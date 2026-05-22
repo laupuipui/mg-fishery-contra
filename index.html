@@ -202,7 +202,7 @@ body.light .contra-table tr.overpaid td{background:rgba(234,108,26,.18)}
 .row-btns{display:flex;gap:4px;align-items:center}
 /* Hidden entry row */
 .hidden-entry td{ opacity:0.28; background:rgba(0,0,0,.04)!important; }
-.hidden-entry /* Custom print checkboxes */
+/* Custom print checkboxes */
 .cp-check{
   display:inline-flex;align-items:center;gap:5px;
   padding:5px 10px;border-radius:5px;cursor:pointer;
@@ -576,7 +576,7 @@ body.fs-lg .alloc-input{font-size:14px}
   <!-- Left: core daily actions -->
   <div id="topbar-left">
     <button class="tb-btn yellow" onclick="toggleRates()" data-i="btn_rates">💱 汇率</button>
-    <button class="tb-btn orange" id="btn-cd-tb" onclick="openCDModal()" data-i="btn_cd">C/D 带入</button>
+    <button class="tb-btn orange" id="btn-cd-tb" onclick="openCDModal()" data-i="btn_cd">C/D 带入 <span id="cd-badge" class="cd-badge" style="display:none">0</span></button>
     <button class="tb-btn green" onclick="saveChart()" data-i="btn_new_chart" id="btn-save">💾 Save</button>
     <button class="tb-btn" id="btn-save-as" onclick="saveChartAs()" style="color:var(--green);border-color:rgba(0,212,144,.3);font-size:10px;padding:5px 7px" title="Save As">As</button>
     <button class="tb-btn icon" id="btn-undo" onclick="undoEntry()" disabled title="Undo">↩</button>
@@ -1172,7 +1172,14 @@ function _setSyncStatusActual(state, detail){
     login:      { text:'🔑 点击登录', bg:'rgba(0,200,240,.12)',   color:'var(--accent)', border:'rgba(0,200,240,.4)' },
   };
   var s = map[state] || map.local;
-  el.textContent = s.text;
+  var displayText = s.text;
+  if(state === 'online'){
+    var now = new Date();
+    var hh = now.getHours().toString().padStart(2,'0');
+    var mm = now.getMinutes().toString().padStart(2,'0');
+    displayText = '🟢 ' + hh + ':' + mm + ' 已同步';
+  }
+  el.textContent = displayText;
   el.style.background  = s.bg;
   el.style.color       = s.color;
   el.style.borderColor = s.border;
@@ -1375,6 +1382,7 @@ function applySnapshot(data, applyEntries) {
   if (Array.isArray(data.customers) && JSON.stringify(data.customers) !== JSON.stringify(customers)) {
     customers = data.customers;
     safeSetItem('mg_master_list', JSON.stringify(customers));
+    changed = true;
   }
   // Only restore rates if Drive's rates are from today (don't overwrite daily-cleared rates)
   if (data.rates && data.rates.sgd) {
@@ -1397,13 +1405,13 @@ function applySnapshot(data, applyEntries) {
     var localCharts = JSON.parse(localStorage.getItem('mg_charts')||'[]');
     var driveCharts = data.charts;
     var mergedMap = {};
-    // Index by chart ID first; if no ID, use trimmed name
-    // Use NAME as primary merge key to avoid duplicate today-charts created by different devices
+    // Use NAME as primary merge key to avoid duplicate today-charts from different devices
     function chartKey(c){ return 'name:' + (c.name||'').trim(); }
+    var _mergeToday = new Date().toISOString().slice(0,10);
+    var _mergeTodayName = (function(){ var n = new Date(); return n.getDate()+'/'+(n.getMonth()+1)+'/'+n.getFullYear(); })();
     // Add local charts first
     localCharts.forEach(function(c){ mergedMap[chartKey(c)] = c; });
-    // Drive charts: keep the one with more entries (real data > empty placeholder)
-    // Tie-break: newer date wins
+    // Drive charts: keep the one with more entries; protect today's locally-rotated chart
     driveCharts.forEach(function(c){
       var k = chartKey(c);
       var existing = mergedMap[k];
@@ -1412,13 +1420,22 @@ function applySnapshot(data, applyEntries) {
       } else {
         var existingCount = (existing.entries||[]).length;
         var driveCount = (c.entries||[]).length;
+        // Today's chart: if local was freshly rotated today (rotatedAt = today), protect it
+        // Don't let Drive's stale version (missing rotatedAt or from a different day) overwrite it
+        if((c.name||'').trim() === _mergeTodayName){
+          var localRotated = (existing.rotatedAt === _mergeToday);
+          var driveRotated = (c.rotatedAt === _mergeToday);
+          if(localRotated && !driveRotated && driveCount <= existingCount){
+            return; // keep local's fresh rotation
+          }
+        }
         if(driveCount > existingCount){
           mergedMap[k] = c;  // Drive has more entries — prefer it
         } else if(driveCount === existingCount){
           // Same count — use newer date
           var existingDate = existing.date ? new Date(existing.date).getTime() : 0;
-          var driveDate = c.date ? new Date(c.date).getTime() : 0;
-          if(driveDate >= existingDate) mergedMap[k] = c;
+          var driveDate2 = c.date ? new Date(c.date).getTime() : 0;
+          if(driveDate2 >= existingDate) mergedMap[k] = c;
         }
         // else: local has more entries → keep local
       }
@@ -1430,7 +1447,7 @@ function applySnapshot(data, applyEntries) {
       var bd = b.date ? new Date(b.date).getTime() : 0;
       return bd - ad;
     });
-    if(merged.length > 60) merged = merged.slice(0,60);
+    if(merged.length > 365) merged = merged.slice(0,365);
     safeSetItem('mg_charts', JSON.stringify(merged));
   }
   // Apply CD deletion signatures from Drive (merge with local)
@@ -1582,7 +1599,7 @@ var _pushToDrive = debounce(function() {
           var bd = b.date ? new Date(b.date).getTime() : 0;
           return bd - ad;
         });
-        if(merged.length > 60) merged = merged.slice(0,60);
+        if(merged.length > 365) merged = merged.slice(0,365);
         safeSetItem('mg_charts', JSON.stringify(merged));
         // CD merge — local always wins (user's deletions must be preserved)
         // We do NOT take Drive's CD entries that don't exist locally, because
@@ -1673,11 +1690,21 @@ var _pushToDrive = debounce(function() {
 
 // ── Find the data file in Drive ──
 function findDriveFile(cb) {
-  fetch("https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name%3D'" + GDRIVE_FILE_NAME + "'&fields=files(id,name)", {
+  fetch("https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&q=name%3D'" + GDRIVE_FILE_NAME + "'&fields=files(id,name,modifiedTime)&orderBy=modifiedTime+desc", {
     headers: { 'Authorization': 'Bearer ' + _gdriveToken }
   }).then(function(r) { return r.json(); })
     .then(function(d) {
-      var id = (d.files && d.files.length > 0) ? d.files[0].id : null;
+      if (!d.files || !d.files.length) { cb(null); return; }
+      var id = d.files[0].id;
+      // Clean up duplicate files (keep newest, delete the rest silently)
+      if (d.files.length > 1) {
+        d.files.slice(1).forEach(function(f) {
+          fetch('https://www.googleapis.com/drive/v3/files/' + f.id, {
+            method: 'DELETE',
+            headers: { 'Authorization': 'Bearer ' + _gdriveToken }
+          }).catch(function(){});
+        });
+      }
       cb(id);
     }).catch(function(e) { console.warn('findDriveFile error:', e); cb(null); });
 }
@@ -1720,16 +1747,20 @@ function pullFromDrive(cb, applyEntriesHint) {
         // Silent decision (no user prompt) — daily auto-rotation handles day changes elsewhere
         var shouldApplyEntries = false;
         if(applyEntriesHint === true){
-          shouldApplyEntries = true;  // manual pull
+          shouldApplyEntries = true;  // manual pull — user explicitly requested
         } else {
           var localEmpty = !entries || entries.length === 0;
           var localWrite = parseInt(localStorage.getItem('mg_last_write')||'0');
           var driveWrite = data.savedAt ? new Date(data.savedAt).getTime() : 0;
-          if(localEmpty){
-            shouldApplyEntries = true;  // first login on this device
-          } else if(driveWrite > localWrite + 60000){
-            shouldApplyEntries = true;  // Drive is meaningfully newer (silent overwrite)
+          var driveSavedDate = data.savedAt ? new Date(data.savedAt).toISOString().slice(0,10) : '';
+          var todayDateStr = new Date().toISOString().slice(0,10);
+          var driveIsFromToday = (driveSavedDate === todayDateStr);
+          if(localEmpty && driveIsFromToday){
+            shouldApplyEntries = true;  // fresh session today, Drive has today's work
+          } else if(driveWrite > localWrite + 60000 && driveIsFromToday){
+            shouldApplyEntries = true;  // Drive is newer AND from today (another device worked)
           }
+          // If Drive data is from a previous day: never apply entries — daily rotation owns that boundary
         }
         applySnapshot(data, shouldApplyEntries);
         setSyncStatus('online');
@@ -1897,10 +1928,12 @@ function _syncStatusSelfCorrect(){
 }
 
 // ── Auto token refresh every 5 minutes ──
+var _tokenRefreshInterval = null;
 function startTokenAutoRefresh() {
+  if (_tokenRefreshInterval) clearInterval(_tokenRefreshInterval);  // prevent duplicate intervals
   // STRATEGY: Check every minute (was 5 min). With 30-min refresh buffer,
   // a token will get 30 chances to refresh silently before it actually expires.
-  setInterval(function() {
+  _tokenRefreshInterval = setInterval(function() {
     if (!_syncEnabled || !_gdriveToken) return;
     var expiry = parseInt(localStorage.getItem('mg_gdrive_expiry') || '0');
     var remaining = expiry - Date.now();
@@ -1994,7 +2027,10 @@ function waitForGISAndSilentLogin() {
 }
 
 // Refresh token when page becomes visible again (phone/tablet wake from sleep)
+var _visibilityRefreshRegistered = false;
 function _setupVisibilityRefresh() {
+  if (_visibilityRefreshRegistered) return;  // only register once
+  _visibilityRefreshRegistered = true;
   document.addEventListener('visibilitychange', function() {
     if (!document.hidden && _syncEnabled) {
       var expiry = parseInt(localStorage.getItem('mg_gdrive_expiry') || '0');
@@ -2828,10 +2864,10 @@ function renderAll(){
         <td><span style="font-size:10px;font-weight:700;color:${BANK_COLORS[group]||'#aaa'}">${entry.bank}</span></td>
         <td class="acct">${fmtAcct(entry.account)}</td>
         <td class="num">${dispAmt}</td>
-        <td class="num"><input class="alloc-input" type="number" step="0.01" value="${isRP?(entry.btHeng||''):(entry.act||'')}" onfocus="setFocusedEntry('${gi}');allocFocus('${gi}',this.dataset.f)" onblur="clearFocusedEntry('${gi}');allocBlur('${gi}',this.dataset.f)" data-f="${isRP?'btHeng':'act'}" oninput="updateAllocLive('${gi}',this.dataset.f,this.value)" onchange="updateAlloc('${gi}',this.dataset.f,this.value)"></td>
-        <td class="num"><input class="alloc-input" type="number" step="0.01" value="${entry.yes||''}" onfocus="allocFocus('${gi}','yes')" onblur="allocBlur('${gi}','yes')" oninput="updateAllocLive('${gi}','yes',this.value)" onchange="updateAlloc('${gi}','yes',this.value)"></td>
-        <td class="num"><input class="alloc-input" type="number" step="0.01" value="${entry.hs||''}" onfocus="allocFocus('${gi}','hs')" onblur="allocBlur('${gi}','hs')" oninput="updateAllocLive('${gi}','hs',this.value)" onchange="updateAlloc('${gi}','hs',this.value)"></td>
-        <td class="num"><input class="alloc-input" type="number" step="0.01" value="${entry.cash||''}" onfocus="allocFocus('${gi}','cash')" onblur="allocBlur('${gi}','cash')" oninput="updateAllocLive('${gi}','cash',this.value)" onchange="updateAlloc('${gi}','cash',this.value)"></td>
+        <td class="num"><input class="alloc-input" type="text" inputmode="decimal" value="${isRP?(entry.btHeng||''):(entry.act||'')}" onfocus="setFocusedEntry('${gi}');allocFocus('${gi}',this.dataset.f)" onblur="clearFocusedEntry('${gi}');allocBlur('${gi}',this.dataset.f)" data-f="${isRP?'btHeng':'act'}" oninput="updateAllocLive('${gi}',this.dataset.f,this.value)" onchange="updateAlloc('${gi}',this.dataset.f,this.value)"></td>
+        <td class="num"><input class="alloc-input" type="text" inputmode="decimal" value="${entry.yes||''}" onfocus="allocFocus('${gi}','yes')" onblur="allocBlur('${gi}','yes')" oninput="updateAllocLive('${gi}','yes',this.value)" onchange="updateAlloc('${gi}','yes',this.value)"></td>
+        <td class="num"><input class="alloc-input" type="text" inputmode="decimal" value="${entry.hs||''}" onfocus="allocFocus('${gi}','hs')" onblur="allocBlur('${gi}','hs')" oninput="updateAllocLive('${gi}','hs',this.value)" onchange="updateAlloc('${gi}','hs',this.value)"></td>
+        <td class="num"><input class="alloc-input" type="text" inputmode="decimal" value="${entry.cash||''}" onfocus="allocFocus('${gi}','cash')" onblur="allocBlur('${gi}','cash')" oninput="updateAllocLive('${gi}','cash',this.value)" onchange="updateAlloc('${gi}','cash',this.value)"></td>
         <td style="font-size:11px;color:var(--text2)">${entry.owner||''}</td>
         <td><div class="row-btns">
           <button class="qa-btn qa-act" onclick="quickAlloc('${gi}','act')" title="全给 ACT/BT HENG">${isRP?'BT':'ACT'}</button>
@@ -2977,7 +3013,7 @@ function allocBlur(id, field){
 function updateAlloc(id,field,val){
   var e=typeof id==='number'?entries[id]:entries.find(function(x){return x._id===id;});
   if(!e) return;
-  e[field]=val===''?0:parseFloat(val)||0;
+  e[field]=val===''?0:Math.max(0,_parseAmtExpr(val)||0);
   // Reset cdHidden flag — user is actively editing, may want CD candidate again
   if(e.cdHidden) delete e.cdHidden;
   saveEntries();
@@ -2987,7 +3023,7 @@ function updateAlloc(id,field,val){
 function updateAllocLive(id,field,val){
   var idx = typeof id==='number' ? id : entries.findIndex(function(x){return x._id===id;});
   if(idx<0) return;
-  entries[idx][field]=val===''?0:parseFloat(val)||0;
+  entries[idx][field]=val===''?0:Math.max(0,_parseAmtExpr(val)||0);
   if(entries[idx].cdHidden) delete entries[idx].cdHidden;
 
   var e=entries[idx];
@@ -3293,7 +3329,8 @@ function openEditModal(id){
       </div>
     </div>
     <label>${t('modal_amt_lbl')}</label>
-    <input type="number" id="edit-amt" value="${e.amount||e.rmAmount||0}" step="0.01">
+    <input type="text" inputmode="decimal" id="edit-amt" value="${e.amount||e.rmAmount||0}" placeholder="0.00 或 100+200" oninput="_updateEditAmtCalc()">
+    <div id="edit-amt-calc-preview" style="font-size:11px;color:var(--text3);margin-top:4px;font-family:'IBM Plex Mono',monospace;min-height:14px"></div>
     <label>${t('modal_cur_lbl')}</label>
     <div class="currency-chips">
       ${['RM','SGD','IDR','THB'].map(c=>`<div class="chip ${e.currency===c?'selected':''}" onclick="editSelectCur('${c}',this)">${c}</div>`).join('')}
@@ -3322,7 +3359,7 @@ function editSelectCur(c,el){
   el.classList.add('selected'); modalState.editCur=c;
 }
 function confirmEdit(idx){
-  const amt=parseFloat(document.getElementById('edit-amt').value)||0;
+  const amt=(_parseAmtExpr(document.getElementById('edit-amt').value)||0);
   const owner=document.getElementById('edit-owner').value.trim();
   const cur=modalState.editCur||entries[idx].currency;
   pushUndo();
@@ -3740,6 +3777,27 @@ function _parseAmtExpr(raw){
   return total;
 }
 
+// Live update calc preview for edit modal
+function _updateEditAmtCalc(){
+  var inp = document.getElementById('edit-amt');
+  var prev = document.getElementById('edit-amt-calc-preview');
+  if(!inp || !prev) return;
+  var raw = inp.value || '';
+  if(!raw.trim()){ prev.textContent = ''; return; }
+  if(/[+\-]/.test(raw.replace(/^-/,''))){
+    var total = _parseAmtExpr(raw);
+    if(isNaN(total)){
+      prev.textContent = '⚠️ 无效输入';
+      prev.style.color = 'var(--red)';
+    } else {
+      prev.textContent = '= ' + total.toLocaleString('en-MY', {minimumFractionDigits:2, maximumFractionDigits:2});
+      prev.style.color = 'var(--green)';
+    }
+  } else {
+    prev.textContent = '';
+  }
+}
+
 // Live update calc preview as user types
 function _updateAmtCalc(){
   var inp = document.getElementById('amt-input');
@@ -4151,7 +4209,7 @@ function ncOwner(){
   }
   const tmp={name:newCustState.name,bank:newCustState.bank,account:newCustState.account,isNew:true};
   closeModal('modal-new');
-  modalState={step:'amount',customer:tmp,customerName:tmp.name,finalCustomer:tmp,owner};
+  modalState={step:'amount',customer:tmp,customerName:tmp.name,finalCustomer:tmp,owner,forceGroup:newCustState.bankGroup||null};
   document.getElementById('modal-add').classList.remove('hidden');
   renderModalStep();
 }
@@ -4294,7 +4352,7 @@ function renderCDList(){
   var sel = selEl ? selEl.value : 'all';
 
   var filterId = (sel === 'all') ? null : parseInt(sel);
-  if(filterId && isNaN(filterId)) filterId = sel;  // string id fallback
+  if(isNaN(filterId)) filterId = sel;  // string id fallback
 
   _cdItems = _cdBuildItems(filterId);
 
@@ -4431,7 +4489,7 @@ function confirmCD(){
   // Get yesterday's display date for the C/D tag (for backward-compat naming)
   var yesterday = new Date(Date.now() - 86400000).toLocaleDateString('en-MY',{day:'numeric',month:'numeric'});
 
-  selectedItems.forEach(function(it){
+  selectedItems.forEach(function(it, iIdx){
     var src = it.entry;
     var info = it.info;
     // Use the actual source chart date for the C/D tag
@@ -4442,7 +4500,7 @@ function confirmCD(){
 
     var baseName = (src.name||'').replace(/\s*\[C\/D fr [^\]]+\]/g,'').trim();
     var newEntry = {
-      _id: 'e' + Date.now() + Math.random().toString(36).slice(2,7),
+      _id: 'e' + Date.now() + '_' + iIdx + '_' + Math.random().toString(36).slice(2,5),
       name: baseName + ' [C/D fr ' + srcDateLabel + ']',
       bank: src.bank,
       account: src.account,
@@ -4520,7 +4578,7 @@ function _doSaveChart(name, overwriteId){
   } else {
     charts.unshift(newChart);
   }
-  if(charts.length > 60) charts.pop();
+  if(charts.length > 365) charts.pop();
   safeSetItem(CHARTS_KEY, JSON.stringify(charts));
   // Force immediate push on Save (bypass debounce)
   if(_syncEnabled && _gdriveToken){
@@ -5251,7 +5309,7 @@ function buildAllocText(person,ds){
         lines.push(e.bank+'  '+fmtAcct(e.account));
         lines.push('AMT: THB '+fmtN(e.amount));
       } else {
-        lines.push(fmtAcct(e.account));
+        lines.push(e.bank+'  '+fmtAcct(e.account));
         lines.push('AMT: '+fmtRM(e[field]||0));
         total += e[field]||0;
       }
@@ -5899,20 +5957,12 @@ function _setupAutoSaveTriggers(){
     }
   });
 
-  // Trigger sync push when page is closing/refreshing — uses sendBeacon for reliability
+  // Trigger sync push when page is closing — save locally as fallback
+  // (Drive sync is handled by beforeunload's synchronous XHR below;
+  //  sendBeacon was removed because it only supports POST, not PATCH which Drive requires)
   window.addEventListener('pagehide', function(){
-    if(_hasUnsavedChanges && _syncEnabled && _gdriveToken && _gdriveFileId){
-      try {
-        var snap = JSON.stringify(buildSnapshot());
-        // sendBeacon is designed for this — fires even when page is closing
-        var blob = new Blob([snap], {type:'application/json'});
-        navigator.sendBeacon(
-          'https://www.googleapis.com/upload/drive/v3/files/'+_gdriveFileId+'?uploadType=media&access_token='+encodeURIComponent(_gdriveToken),
-          blob
-        );
-        // Also save locally as belt-and-suspenders
-        safeSetItem(ENTRIES_KEY, JSON.stringify(entries));
-      } catch(e){}
+    if(_hasUnsavedChanges && entries && entries.length > 0){
+      try { safeSetItem(ENTRIES_KEY, JSON.stringify(entries)); } catch(e){}
     }
   });
 
@@ -6467,9 +6517,10 @@ function _checkDailyChartRotation(){
     });
 
     if(existingMatch){
-      // These are entries from an already-saved historical chart — DON'T re-save (no changes)
-      // Just clear them so user starts today fresh
-      console.log('Rotation: entries match historical chart "' + existingMatch.name + '" — clearing without re-save');
+      // Entries are already saved in a historical chart — clear so user starts today fresh
+      entries = [];
+      safeSetItem(ENTRIES_KEY, '[]');
+      console.log('Rotation: entries matched historical chart "' + existingMatch.name + '" — cleared');
     } else if(currentChartId && currentChartName){
       // Has chart link AND entries differ from any saved version — save the changes
       try { _doSaveChart(currentChartName, currentChartId); }
@@ -6509,17 +6560,23 @@ function _checkDailyChartRotation(){
       id: currentChartId,
       name: todayName,
       date: new Date().toISOString(),
+      rotatedAt: todayKey,
       entries: [],
       rates: {sgd: rates.sgd||null, thb: rates.thb||null, idr: rates.idr||null, sgdThb: rates.sgdThb||null, sgdIdr: rates.sgdIdr||null}
     };
     charts.unshift(newTodayChart);
-    if(charts.length > 60) charts.pop();
+    if(charts.length > 365) charts.pop();
     safeSetItem(CHARTS_KEY, JSON.stringify(charts));
     if(typeof markSaved === 'function') markSaved();
     // Push to Drive so other devices see today's empty chart too
     if(typeof _pushToDrive === 'function') _pushToDrive();
   }
   if(typeof updateCurrentChartBanner === 'function') updateCurrentChartBanner();
+  if(typeof _showSuccessToast === 'function'){
+    setTimeout(function(){
+      _showSuccessToast(isEng ? 'Switched to today\'s records (' + todayName + ')' : '已自动切换到今日记录 (' + todayName + ')');
+    }, 400);
+  }
 
   // Also clear today's rates if they're from a previous day
   // (rates daily-clear is handled by RATES_KEY initialization, but reinforce here)
@@ -7737,7 +7794,7 @@ function updateBalRow(id){
 // Export only selected entries
 function getSelectedEntries(){
   var cbs = document.querySelectorAll('.batch-cb:checked');
-  var ids = Array.from(cbs).map(function(c){ return c.dataset.gi; });
+  var ids = Array.from(cbs).map(function(c){ return c.dataset.entryId; });
   return entries.filter(function(e){ return ids.includes(e._id); });
 }
 
@@ -7810,6 +7867,7 @@ function batchExportText(person){
       document.getElementById('export-modal-title').textContent = 'Export — ' + person + ' (批量 '+sel.length+' 条)';
       document.getElementById('export-preview').textContent = currentExportText;
       document.getElementById('modal-export').classList.remove('hidden');
+      _currentExportState = { isBatch: true, section: 'all', person: person };
     }
   } finally {
     entries = orig;
@@ -7845,7 +7903,7 @@ function batchExportPDFv2(){
 function exportSelected(field){
   var sel = getSelectedEntries();
   if(!sel.length){ alert(isEng?'No entries selected':'请先勾选要导出的记录'); return; }
-  // Temporarily swap entries for export
+  _batchExportCache = sel.slice();  // cache so YES section picker & img/PDF use selected subset
   var orig = entries;
   entries = sel;
   try {
@@ -7876,7 +7934,7 @@ var _focusedEntryId = null;
 
 function updateBatchBar(){
   var cbs = document.querySelectorAll('.batch-cb:checked');
-  _batchSelected = new Set(Array.from(cbs).map(function(c){ return parseInt(c.dataset.gi); }));
+  _batchSelected = new Set(Array.from(cbs).map(function(c){ return c.dataset.entryId; }));
   var bar = document.getElementById('batch-bar');
   var cnt = document.getElementById('batch-count');
   if(_batchSelected.size > 0){
@@ -7897,19 +7955,13 @@ function toggleSelectAll(cb, group){
     if(tr) tr.classList.toggle('batch-selected', cb.checked);
   });
   updateBatchBar();
-  return;
-  // (legacy code below skipped)
-  tbody.querySelectorAll('.batch-cb').forEach(function(c){ c.checked = cb.checked; });
-  updateBatchBar();
 }
 
 function batchDelete(){
   if(!_batchSelected.size) return;
   if(!confirm((isEng?'Delete '+_batchSelected.size+' entries?':'删除 '+_batchSelected.size+' 条记录？'))) return;
   pushUndo();
-  // Delete in reverse order to preserve indices
-  var toDelete = Array.from(_batchSelected).sort(function(a,b){return b-a;});
-  toDelete.forEach(function(idx){ entries.splice(idx,1); });
+  entries = entries.filter(function(e){ return !_batchSelected.has(e._id); });
   _batchSelected.clear();
   document.getElementById('batch-bar').classList.add('hidden');
   saveEntries(); renderAll();
