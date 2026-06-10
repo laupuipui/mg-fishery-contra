@@ -31,6 +31,10 @@ body.light {
   --alloc-box:#c8d4e0; --row-alt:rgba(0,0,0,.03);
 }
 *{box-sizing:border-box;margin:0;padding:0}
+/* Reserve the scrollbar gutter permanently so adding a row / opening a modal
+   never toggles the vertical scrollbar — that toggle was shifting the whole
+   layout (and the Add button) by ~15px ("跑位"). */
+html{scrollbar-gutter:stable}
 body{font-family:'IBM Plex Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden;transition:background .2s,color .2s}
 
 /* ── TOPBAR ── */
@@ -486,13 +490,16 @@ body.simple-mode #btn-save.unsaved-warn{animation:savePulse 1.6s ease-in-out inf
   padding:10px 20px;display:flex;gap:12px;align-items:center;z-index:300;
   box-shadow:0 4px 24px rgba(0,0,0,.5);font-size:13px;
 }
-/* Table search */
+/* Table search — floating window (centred near top, prominent border + shadow) */
 #table-search-wrap{
-  position:sticky;top:60px;z-index:150;
-  background:var(--surface);border-bottom:1px solid var(--border);
-  padding:7px 16px;display:none;align-items:center;gap:8px;
+  position:fixed;top:68px;left:50%;transform:translateX(-50%);z-index:9500;
+  background:var(--surface);border:2px solid var(--accent);border-radius:12px;
+  padding:12px 16px;display:none;align-items:center;gap:10px;
+  box-shadow:0 14px 44px rgba(0,0,0,.55);
+  width:min(620px, calc(100vw - 24px));
 }
 #table-search-wrap.active{display:flex}
+@media(max-width:600px){ #table-search-wrap{top:60px;padding:10px 12px} }
 #table-search-inp{
   flex:1;background:var(--surface2);border:1.5px solid var(--accent);
   color:var(--text);padding:7px 14px;border-radius:6px;font-size:14px;
@@ -676,12 +683,8 @@ body.fs-lg .alloc-input{font-size:14px}
   <div id="tables-container"></div>
 
   <!-- GRAND TOTAL -->
-  <!-- Currently-editing chart — floating pill (top-right, fixed position) -->
-  <div id="current-chart-banner" style="position:fixed;top:60px;right:14px;z-index:9000;display:flex;align-items:center;gap:8px;padding:7px 14px;background:rgba(20,30,42,.95);border:1.5px solid var(--accent);border-radius:20px;font-family:'IBM Plex Mono',monospace;font-size:12px;backdrop-filter:blur(8px);box-shadow:0 4px 16px rgba(0,0,0,.3);max-width:calc(100vw - 28px);overflow:hidden;cursor:pointer" onclick="this.style.opacity = this.style.opacity==='0.3' ? '1' : '0.3'" title="点击切换透明度">
-    <span style="font-size:14px">📝</span>
-    <span id="ccb-name" style="font-weight:700;color:var(--accent);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:160px">--</span>
-    <span id="ccb-status" style="font-size:10px;padding:1px 6px;border-radius:8px;background:var(--surface2);font-weight:600;white-space:nowrap"></span>
-  </div>
+  <!-- (Removed floating top-right chart pill — it blocked the Add button and couldn't be closed.
+       The current chart name + 今日/历史 indicator is already shown in the daily-summary bar below.) -->
   <!-- Daily summary banner — shows today's chart name + record count + completion % -->
   <div id="daily-summary" style="display:flex;align-items:center;gap:14px;padding:10px 16px;margin-bottom:14px;background:linear-gradient(90deg, rgba(0,200,240,.06), transparent);border-left:3px solid var(--accent);border-radius:6px;font-family:'IBM Plex Mono',monospace;flex-wrap:wrap">
     <div style="font-size:12px;color:var(--text3)">📅 <span id="ds-date" style="color:var(--text);font-weight:700">--</span></div>
@@ -4261,7 +4264,14 @@ function _cdComputeUnalloc(e){
   };
 }
 
-// Build CD candidate list from all historical charts (excluding today's chart)
+// Stable identity signature for a CD entry — used to hide/match the right entry
+// even after the chart array gets re-sorted or re-saved (index becomes unreliable).
+function _cdSig(e){
+  if(!e) return '';
+  return (e.name||'')+'|'+(e.account||'')+'|'+(e.owner||'')+'|'+(e.group||'')+'|'+(e.amount||0)+'|'+(e.rmAmount||0);
+}
+
+// Build CD candidate list from historical charts (excluding today's chart)
 function _cdBuildItems(filterChartId){
   var todayStr = (function(){
     var n = new Date();
@@ -4273,7 +4283,10 @@ function _cdBuildItems(filterChartId){
     if(!c || !Array.isArray(c.entries)) return;
     // Skip today's chart — we shouldn't carry-down from today's own work
     if(c.name && c.name.trim() === todayStr) return;
-    if(c.id === currentChartId) return;  // Also skip currently-loaded chart
+    // Only skip the currently-loaded chart when it IS today's. Otherwise a chart
+    // loaded for review (e.g. yesterday) would wrongly be excluded, hiding the
+    // very entries the user just added there from C/D.
+    if(c.id === currentChartId && currentChartName && currentChartName.trim() === todayStr) return;
     // Optional filter by specific chart
     if(filterChartId && c.id !== filterChartId) return;
     c.entries.forEach(function(e, eIdx){
@@ -4285,6 +4298,8 @@ function _cdBuildItems(filterChartId){
       items.push({
         entry: e,
         entryIdx: eIdx,
+        entryId: e._id || null,
+        sig: _cdSig(e),
         chartId: c.id,
         chartName: c.name || '',
         chartDate: c.date || '',
@@ -4293,6 +4308,24 @@ function _cdBuildItems(filterChartId){
     });
   });
   return items;
+}
+
+// The default C/D source = the most recent chart strictly before today
+// (i.e. the previous working day). Returns its chartId, or null if none.
+function _cdDefaultSourceId(){
+  var todayStr = (function(){
+    var n = new Date();
+    return n.getDate()+'/'+(n.getMonth()+1)+'/'+n.getFullYear();
+  })();
+  var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
+  var best = null, bestTime = -1;
+  charts.forEach(function(c){
+    if(!c || !Array.isArray(c.entries)) return;
+    if(c.name && c.name.trim() === todayStr) return;  // exclude today
+    var t = c.date ? new Date(c.date).getTime() : 0;
+    if(t > bestTime){ bestTime = t; best = c.id; }
+  });
+  return best;
 }
 
 // Get unique source charts that have CD candidates (for the filter dropdown)
@@ -4330,12 +4363,33 @@ function openCDModal(){
     return;
   }
 
-  // Build source selector
-  var optsHTML = '<option value="all">'+(isEng?'All sources':'全部来源')+' ('+sources.reduce(function(s,x){return s+x.count;},0)+')</option>';
-  optsHTML += sources.map(function(s){
+  // Build source selector — default to the previous working day (not "All sources"),
+  // so ancient unfinished entries (which live under "All sources") don't keep
+  // resurfacing. User can still switch to "All sources" or any other day.
+  var defId = _cdDefaultSourceId();
+  var totalCount = sources.reduce(function(s,x){return s+x.count;},0);
+  var opts = [{ value:'all', label:(isEng?'All sources':'全部来源')+' ('+totalCount+')' }];
+  sources.forEach(function(s){
     var dispDate = '';
     try { dispDate = new Date(s.chartDate).toLocaleDateString('en-MY'); } catch(_){}
-    return '<option value="'+s.chartId+'">'+(s.chartName||dispDate)+' ('+s.count+')</option>';
+    opts.push({ value:String(s.chartId), label:(s.chartName||dispDate)+' ('+s.count+')' });
+  });
+  var selVal = 'all';
+  if(defId != null){
+    // If the previous day has candidates it's already in `opts`; if not, add a
+    // (0) option so the default view is still "yesterday only", not "all".
+    if(!opts.some(function(o){ return o.value === String(defId); })){
+      var _charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
+      var dc = _charts.find(function(c){ return String(c.id)===String(defId); });
+      if(dc){
+        var dDate=''; try{ dDate=new Date(dc.date).toLocaleDateString('en-MY'); }catch(_){}
+        opts.splice(1,0,{ value:String(defId), label:(dc.name||dDate)+' (0)' });
+      }
+    }
+    if(opts.some(function(o){ return o.value === String(defId); })) selVal = String(defId);
+  }
+  var optsHTML = opts.map(function(o){
+    return '<option value="'+o.value+'"'+(o.value===selVal?' selected':'')+'>'+o.label+'</option>';
   }).join('');
 
   srcSel.innerHTML = '<label style="font-size:12px;color:var(--text2)">'+t('cd_from')+'</label>' +
@@ -4409,7 +4463,10 @@ function cdSelectAll(){
 function updateCDBadge(){
   var badge = document.getElementById('cd-badge');
   if(!badge) return;
-  var items = _cdBuildItems(null);
+  // Count only the previous working day (default C/D source), not all 365 days —
+  // otherwise ancient unfinished entries keep the badge permanently lit.
+  var defId = _cdDefaultSourceId();
+  var items = (defId != null) ? _cdBuildItems(defId) : [];
   if(items.length > 0){
     badge.textContent = items.length;
     badge.style.display = '';
@@ -4423,7 +4480,7 @@ function deleteCDItem(i){
   if(!confirm(isEng?'Remove this C/D item?':'确认移除此 C/D 记录？')) return;
   var item = _cdItems[i];
   if(!item) return;
-  _cdSetHiddenInChart(item.chartId, item.entryIdx, true);
+  _cdSetHiddenInChart(item.chartId, _cdRef(item), true);
   localStorage.setItem('mg_last_write', Date.now().toString());
   _pushToDrive();
   openCDModal();  // re-render
@@ -4438,7 +4495,7 @@ function deleteCDGroup(){
     if(!confirm(isEng?'Remove ALL C/D items? (entries stay in source charts, just hidden from C/D list)':'确认移除所有 C/D 记录？（源 chart 中的客户保留，只是不显示在 C/D 列表）')) return;
     var allItems = _cdBuildItems(null);
     allItems.forEach(function(it){
-      _cdSetHiddenInChart(it.chartId, it.entryIdx, true);
+      _cdSetHiddenInChart(it.chartId, _cdRef(it), true);
     });
   } else {
     var filterId = parseInt(sel);
@@ -4448,7 +4505,7 @@ function deleteCDGroup(){
     var srcName = srcItems[0].chartName || '';
     if(!confirm((isEng?'Remove C/D from: ':'移除来自「')+srcName+(isEng?'?':'」的所有 C/D 项？'))) return;
     srcItems.forEach(function(it){
-      _cdSetHiddenInChart(it.chartId, it.entryIdx, true);
+      _cdSetHiddenInChart(it.chartId, _cdRef(it), true);
     });
   }
 
@@ -4457,16 +4514,34 @@ function deleteCDGroup(){
   openCDModal();
 }
 
-// Internal: set cdHidden flag on a specific entry in a specific saved chart
-function _cdSetHiddenInChart(chartId, entryIdx, hidden){
+// Build an identity ref for a CD list item (for stable hide/match)
+function _cdRef(it){
+  return { entryId: it.entryId, sig: it.sig, idx: it.entryIdx };
+}
+
+// Internal: set cdHidden flag on a specific entry in a specific saved chart.
+// `ref` = { entryId, sig, idx } — match by _id first, then signature, then
+// index as a last resort, so async re-sorts/re-saves can't hide the wrong row.
+function _cdSetHiddenInChart(chartId, ref, hidden){
   try {
     var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
-    var c = charts.find(function(x){ return x.id === chartId; });
-    if(!c || !Array.isArray(c.entries) || !c.entries[entryIdx]) return;
+    var c = charts.find(function(x){ return String(x.id) === String(chartId); });
+    if(!c || !Array.isArray(c.entries)) return;
+    var target = null;
+    if(ref && ref.entryId){
+      target = c.entries.find(function(e){ return e && e._id === ref.entryId; });
+    }
+    if(!target && ref && ref.sig){
+      target = c.entries.find(function(e){ return e && _cdSig(e) === ref.sig; });
+    }
+    if(!target && ref && typeof ref.idx === 'number'){
+      target = c.entries[ref.idx];
+    }
+    if(!target) return;
     if(hidden){
-      c.entries[entryIdx].cdHidden = true;
+      target.cdHidden = true;
     } else {
-      delete c.entries[entryIdx].cdHidden;
+      delete target.cdHidden;
     }
     safeSetItem(CHARTS_KEY, JSON.stringify(charts));
   } catch(e){ console.warn('_cdSetHiddenInChart failed:', e); }
@@ -4525,8 +4600,8 @@ function confirmCD(){
     }
     entries.push(newEntry);
 
-    // Mark source entry as cdHidden in its chart
-    _cdSetHiddenInChart(it.chartId, it.entryIdx, true);
+    // Mark source entry as cdHidden in its chart (by stable identity)
+    _cdSetHiddenInChart(it.chartId, _cdRef(it), true);
   });
 
   saveEntries();
@@ -4725,8 +4800,10 @@ function openHistory(){
   renderHistoryList(_allCharts);
   document.getElementById('modal-history').classList.remove('hidden');
 }
-function loadChart(i){
-  const c=JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]')[i];
+function loadChart(id){
+  // Look up by stable id (not array index) — see renderHistoryList note.
+  const charts=JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
+  const c=charts.find(function(x){ return String(x.id)===String(id); });
   if(!c) return;
   if(!confirm(isEng?`Load "${c.name}"?`:`载入「${c.name}」？`)) return;
   pushUndo(); entries=JSON.parse(JSON.stringify(c.entries));
@@ -4741,10 +4818,12 @@ function loadChart(i){
   if(sb) sb.title='Save: '+c.name;
   saveEntries(); closeModal('modal-history'); renderAll();
 }
-function deleteChart(i){
+function deleteChart(id){
   const charts=JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
-  if(!confirm((isEng?'Delete ':'删除 ')+charts[i]?.name+'?')) return;
-  charts.splice(i,1); safeSetItem(CHARTS_KEY,JSON.stringify(charts)); _pushToDrive(); openHistory();
+  const idx=charts.findIndex(function(x){ return String(x.id)===String(id); });
+  if(idx<0) return;
+  if(!confirm((isEng?'Delete ':'删除 ')+charts[idx]?.name+'?')) return;
+  charts.splice(idx,1); safeSetItem(CHARTS_KEY,JSON.stringify(charts)); _pushToDrive(); openHistory();
 }
 
 // ======================================================
@@ -5147,6 +5226,10 @@ function mlAddViaFlow(){
 // ======================================================
 let currentExportText='';
 function exportFor(person){
+  // Clear any leftover batch selection so a normal export never reuses a stale
+  // batch subset (batch Image/PDF don't open the export modal, so the cache that
+  // _exportForActual sniffs would otherwise linger and corrupt the next export).
+  _batchExportCache = null;
   if(person === 'YES'){
     // Show RP / RM section selector first
     _showYesSectionPicker();
@@ -5247,6 +5330,7 @@ function buildYesWA(ds, section){
         lines.push('[ RP (IDR) ]');
         rpIDR.forEach(function(e,i){ pushEntry(i, e, 'IDR '+(Number(e.amount)||0).toLocaleString()); });
         var totIDR = rpIDR.reduce(function(s,e){ return s+(e.amount||0); },0);
+        lines.push('');
         lines.push('RP TOTAL: IDR '+(Number(totIDR)||0).toLocaleString());
       }
       var rpSGD = entries.filter(function(e){ return e.group==='RP'&&!e.hidden&&e.currency==='SGD'&&(e.yes||0)>0; });
@@ -5255,6 +5339,7 @@ function buildYesWA(ds, section){
         lines.push('[ RP (SGD) ]');
         rpSGD.forEach(function(e,i){ pushEntry(i, e, 'SGD '+fmtN(e.amount)); });
         var totSGD = rpSGD.reduce(function(s,e){ return s+(e.amount||0); },0);
+        lines.push('');
         lines.push('RP TOTAL: SGD '+fmtN(totSGD));
       }
       return;
@@ -5272,9 +5357,11 @@ function buildYesWA(ds, section){
     });
     if(isTHB){
       var totTHB = ge.reduce(function(s,e){ return s+(e.amount||0); },0);
+      lines.push('');
       lines.push(grp+' TOTAL: THB '+fmtN(totTHB));
     } else {
       var tot = ge.reduce(function(s,e){ return s+(e.yes||0); },0);
+      lines.push('');
       lines.push(grp+' TOTAL: '+fmtRM(tot));
     }
   });
@@ -5330,6 +5417,7 @@ function buildAllocText(person,ds){
     } else {
       totStr = fmtRM(gt);
     }
+    lines.push('');                       // blank line before the group TOTAL
     lines.push(grp+' TOTAL: '+totStr);
   });
 
@@ -7877,9 +7965,10 @@ function batchExportText(person){
 function batchExportPDF(){
   var sel = _getBatchSelectedEntries();
   if(!sel.length){ alert('请先勾选记录'); return; }
+  _batchExportCache = sel.slice();   // use THIS selection (not a stale one from a prior batch op)
   var orig = entries;
   entries = sel;
-  try { exportPDF(); } finally { entries = orig; }
+  try { exportPDF(); } finally { entries = orig; _batchExportCache = null; }
 }
 
 function batchExportImg(){
@@ -7888,7 +7977,9 @@ function batchExportImg(){
   _batchExportCache = sel.slice();
   var orig = entries;
   entries = sel;
-  try { downloadExportImg(); } finally { entries = orig; }
+  // Clear cache after — img/PDF don't open modal-export, so the cache would
+  // otherwise linger and corrupt the next (normal) export's amounts.
+  try { downloadExportImg(); } finally { entries = orig; _batchExportCache = null; }
 }
 
 function batchExportPDFv2(){
@@ -7897,7 +7988,7 @@ function batchExportPDFv2(){
   _batchExportCache = sel.slice();
   var orig = entries;
   entries = sel;
-  try { exportPDF(); } finally { entries = orig; }
+  try { exportPDF(); } finally { entries = orig; _batchExportCache = null; }
 }
 
 function exportSelected(field){
@@ -8136,17 +8227,19 @@ function renderHistoryList(charts){
     return;
   }
   el.innerHTML = charts.map(function(c,i){
-    var origIdx = _allCharts.findIndex(function(x){ return x.id===c.id; });
-    if(origIdx<0) origIdx=i;
+    // Identify charts by their stable id (NOT array index) — mg_charts gets
+    // re-sorted asynchronously by Drive sync, so a positional index can point
+    // to the wrong chart by the time the user clicks Load/Delete.
+    var cid = String(c.id);
     var gRM = c.entries.filter(function(e){return e.group!=='RP';}).reduce(function(s,e){return s+(e.rmAmount||0);},0);
     return '<div class="hist-item">' +
       '<div class="hist-info">' +
         '<div class="hist-name">'+c.name+'</div>' +
         '<div class="hist-meta">'+new Date(c.date).toLocaleString('en-MY')+' · '+c.entries.length+' entries · RM '+fmtN(gRM)+'</div>' +
       '</div>' +
-      '<button class="tb-btn teal" onclick="loadChart('+origIdx+')">'+t('history_load')+'</button>' +
-      '<button class="tb-btn" onclick="viewChartCustomers('+origIdx+')" style="color:var(--pbb);border-color:rgba(168,127,255,.3)" title="客户历史">👤</button>' +
-      '<button class="tb-btn red" onclick="deleteChart('+origIdx+')">'+t('history_delete')+'</button>' +
+      '<button class="tb-btn teal" onclick="loadChart(\''+cid+'\')">'+t('history_load')+'</button>' +
+      '<button class="tb-btn" onclick="viewChartCustomers(\''+cid+'\')" style="color:var(--pbb);border-color:rgba(168,127,255,.3)" title="客户历史">👤</button>' +
+      '<button class="tb-btn red" onclick="deleteChart(\''+cid+'\')">'+t('history_delete')+'</button>' +
     '</div>';
   }).join('');
 }
@@ -8154,9 +8247,10 @@ function renderHistoryList(charts){
 // ======================================================
 // FEATURE: CUSTOMER TRANSACTION HISTORY
 // ======================================================
-function viewChartCustomers(chartIdx){
-  // Show all customers in a specific chart
-  var c = _allCharts[chartIdx];
+function viewChartCustomers(id){
+  // Show all customers in a specific chart — look up by stable id (not index).
+  var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
+  var c = charts.find(function(x){ return String(x.id)===String(id); });
   if(!c) return;
   var title = document.getElementById('cust-hist-title');
   var body  = document.getElementById('cust-hist-body');
