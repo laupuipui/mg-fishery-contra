@@ -199,6 +199,7 @@ body.light .contra-table tr.overpaid td{background:rgba(234,108,26,.18)}
 .cd-badge{display:inline-block;background:var(--red);color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;margin-left:4px;vertical-align:middle}
 @keyframes fadeInUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
 .sgd-pending-badge{display:inline-block;background:#f59e0b;color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;margin-left:4px;vertical-align:middle}
+.overpaid-badge{display:inline-block;background:var(--orange);color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;margin-left:4px;vertical-align:middle}
 .del-btn{background:none;border:1px solid var(--border);color:var(--text3);width:22px;height:22px;border-radius:4px;cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center;transition:all .15s;flex-shrink:0}
 .del-btn:hover{border-color:var(--red);color:var(--red);background:rgba(255,61,82,.12)}
 .edit-btn{background:none;border:1px solid var(--border);color:var(--accent);width:22px;height:22px;border-radius:4px;cursor:pointer;font-size:11px;display:flex;align-items:center;justify-content:center;transition:all .15s;flex-shrink:0}
@@ -692,12 +693,15 @@ body.fs-lg .alloc-input{font-size:14px}
     <div style="font-size:12px;color:var(--text3)"><span id="ds-count" style="color:var(--text);font-weight:700">0</span> 条记录</div>
     <div id="ds-sep2" style="width:1px;height:14px;background:var(--border2)"></div>
     <div style="font-size:12px;color:var(--text3)">未分配 <span id="ds-pending" style="color:var(--yellow);font-weight:700">0</span> 条</div>
+    <div id="ds-sep-op" style="width:1px;height:14px;background:var(--border2)"></div>
+    <div style="font-size:12px;color:var(--text3)">超付 <span id="ds-overpaid" style="color:var(--orange);font-weight:700">0</span> 条</div>
     <div id="ds-sep3" style="width:1px;height:14px;background:var(--border2)"></div>
     <div style="font-size:12px;color:var(--text3)">完成度 <span id="ds-done" style="color:var(--green);font-weight:700">100%</span></div>
   </div>
 
   <div id="grand-total-bar">
     <div class="gt-item"><div class="gt-label" data-i="gt_rm">Grand Total RM</div><div class="gt-value" id="gt-rm">RM 0.00</div></div>
+    <div class="gt-item"><div class="gt-label" style="color:var(--thb)">Total THB</div><div class="gt-value" style="color:var(--thb)" id="gt-thb">THB 0.00</div></div>
     <div class="gt-item"><div class="gt-label">Total IDR</div><div class="gt-value" style="color:var(--orange)" id="gt-idr">IDR 0</div></div>
     <div class="gt-sep"></div>
     <div class="gt-item"><div class="gt-label" style="color:var(--mbb)" data-i="gt_act">ACT</div><div class="gt-value" style="color:var(--mbb)" id="gt-act">RM 0.00</div></div>
@@ -707,6 +711,7 @@ body.fs-lg .alloc-input{font-size:14px}
     <div class="gt-item"><div class="gt-label" style="color:var(--rp)" data-i="gt_bt">BT HENG</div><div class="gt-value" style="color:var(--rp)" id="gt-btheng">0</div></div>
     <div class="gt-sep"></div>
     <div class="gt-item"><div class="gt-label" data-i="gt_unalloc">未分配</div><div class="gt-value warn" id="gt-unalloc">RM 0.00</div></div>
+    <div class="gt-item"><div class="gt-label" style="color:var(--orange)" data-i="gt_overpaid">超付 Overpaid</div><div class="gt-value" style="color:var(--orange)" id="gt-overpaid">RM 0.00</div></div>
   </div>
 
   <!-- EXPORT BAR -->
@@ -936,6 +941,10 @@ body.fs-lg .alloc-input{font-size:14px}
     <span class="si-ico">📦</span>
     <span class="si-lbl">数据恢复<span class="si-sub">从本地快照恢复数据</span></span>
   </button>
+  <button class="sidebar-item" onclick="openOpLog();closeSidebar()">
+    <span class="si-ico">📜</span>
+    <span class="si-lbl">操作日志<span class="si-sub">查看每个操作，可一键恢复</span></span>
+  </button>
   <button class="sidebar-item" onclick="manualPullFromDrive();closeSidebar()">
     <span class="si-ico">🔄</span>
     <span class="si-lbl">从云端拉取<span class="si-sub">手动同步 Drive 数据</span></span>
@@ -1095,6 +1104,23 @@ body.fs-lg .alloc-input{font-size:14px}
   </div>
 </div>
 
+<!-- ═══ OPERATION LOG MODAL ═══ -->
+<div id="modal-oplog" class="modal-overlay hidden">
+  <div class="modal wide" style="max-width:620px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+      <h2>📜 操作日志</h2>
+      <button onclick="closeModal('modal-oplog')" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--text3)">×</button>
+    </div>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:10px">后台自动记录每个重要操作。带「恢复到此操作前」的记录可一键还原（还原本身也可撤销）。</p>
+    <input type="text" id="oplog-search" placeholder="搜索操作..." oninput="renderOpLog()" style="width:100%;background:var(--surface2);border:1.5px solid var(--border2);color:var(--text);padding:8px 12px;border-radius:6px;font-size:13px;margin-bottom:10px">
+    <div id="oplog-list" style="max-height:440px;overflow-y:auto"></div>
+    <div class="btn-row">
+      <button class="btn-secondary" onclick="closeModal('modal-oplog')">关闭</button>
+      <button class="btn-danger" onclick="clearOpLog()">🗑 清空日志</button>
+    </div>
+  </div>
+</div>
+
 <!-- CUSTOMER HISTORY MODAL -->
 <div id="modal-cust-hist" class="modal-overlay hidden">
   <div class="modal wide" style="max-width:560px">
@@ -1106,18 +1132,7 @@ body.fs-lg .alloc-input{font-size:14px}
 <!-- XLSX -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script charset="utf-8">
-// ======================================================
-// FIREBASE CONFIG
-// ======================================================
-const firebaseConfig = {
-  apiKey: "AIzaSyCfC8LUBJetfNm8y5-_tzIlud4TQsP_VTE",
-  authDomain: "mg-fishery-contra.firebaseapp.com",
-  databaseURL: "https://mg-fishery-contra-default-rtdb.asia-southeast1.firebasedatabase.app",
-  projectId: "mg-fishery-contra",
-  storageBucket: "mg-fishery-contra.firebasestorage.app",
-  messagingSenderId: "519100727500",
-  appId: "1:519100727500:web:99175edcc3b8ea5b760269"
-};
+// (Removed unused firebaseConfig — the Firebase SDK was never loaded; sync uses Google Drive only.)
 
 // ======================================================
 // GOOGLE DRIVE SYNC ENGINE
@@ -1345,10 +1360,66 @@ function buildSnapshot() {
     owners:    OWNERS_LIST,
     banks:     ALL_BANKS_OPTS,
     charts:    JSON.parse(localStorage.getItem('mg_charts')  || '[]'),
-    cdStore:   [],  // Deprecated in v3; CD is computed from charts.entries.cdHidden
+    cdStore:   [],  // Deprecated in v3; CD is computed live from charts
     cdDeleted: cdDeleted,
+    cdDismissed: (function(){ try{ return JSON.parse(localStorage.getItem('mg_cd_dismissed')||'[]'); }catch(e){ return []; } })(),
     savedAt:   new Date().toISOString()
   };
+}
+
+// ── Chart merge helpers — UNION entries so no row is ever dropped across devices ──
+// Entry identity: stable _id, else content signature (_cdSig).
+function _entryKey(e){ return (e && e._id) ? ('id:'+e._id) : ('sig:'+(typeof _cdSig==='function'?_cdSig(e):JSON.stringify(e))); }
+
+// Merge two same-name charts: UNION their entries. On same-key conflict keep the row from the
+// chart with the newer date (more likely to carry later allocations). Never drops a unique row.
+function _mergeChartPair(a, b){
+  if(!a) return b; if(!b) return a;
+  var aNewer = (new Date(a.date||0).getTime()) >= (new Date(b.date||0).getTime());
+  var primary = aNewer ? a : b;        // metadata + conflict winner
+  var secondary = aNewer ? b : a;
+  var byKey = {}, order = [];
+  (primary.entries||[]).forEach(function(e){ if(!e) return; var k=_entryKey(e); if(!(k in byKey)){byKey[k]=e;order.push(k);} else {byKey[k]=e;} });
+  (secondary.entries||[]).forEach(function(e){ if(!e) return; var k=_entryKey(e); if(!(k in byKey)){byKey[k]=e;order.push(k);} });
+  var mergedEntries = order.map(function(k){ return byKey[k]; });
+  return Object.assign({}, primary, { entries: mergedEntries });
+}
+
+// Merge two chart LISTS by name (union entries per same-name chart). No row ever lost.
+function _mergeChartLists(localList, driveList){
+  var map = {}, order = [];
+  function key(c){ return 'name:'+((c.name||'').trim()); }
+  function take(list){
+    (list||[]).forEach(function(c){
+      if(!c) return;
+      var k = key(c);
+      if(!(k in map)){ map[k] = c; order.push(k); }
+      else { map[k] = _mergeChartPair(map[k], c); }
+    });
+  }
+  take(localList); take(driveList);
+  var merged = order.map(function(k){ return map[k]; });
+  merged.sort(function(a,b){ return (b.date?new Date(b.date).getTime():0) - (a.date?new Date(a.date).getTime():0); });
+  if(merged.length > 365) merged = merged.slice(0,365);
+  return merged;
+}
+
+// If a merge would shrink any same-name chart's entry count, back up the local list first.
+function _backupBeforeChartMerge(localList, mergedList){
+  try {
+    var mByName = {}; mergedList.forEach(function(c){ mByName[(c.name||'').trim()] = (c.entries||[]).length; });
+    var shrink = (localList||[]).some(function(c){
+      var after = mByName[(c.name||'').trim()];
+      return typeof after === 'number' && after < (c.entries||[]).length;
+    });
+    if(!shrink) return;
+    var pool = JSON.parse(localStorage.getItem('mg_overwrite_backups')||'[]');
+    pool.unshift({ ts: Date.now(), replacedAt: new Date().toISOString(),
+      original: { id:'chartmerge_'+Date.now(), name:'合并前自动备份(全部图表)', date:new Date().toISOString(),
+                  entries: [], charts: JSON.parse(JSON.stringify(localList||[])) } });
+    if(pool.length > 12) pool = pool.slice(0,12);
+    localStorage.setItem('mg_overwrite_backups', JSON.stringify(pool));
+  } catch(e){ console.warn('_backupBeforeChartMerge failed:', e); }
 }
 
 // ── Apply a snapshot received from Drive ──
@@ -1364,6 +1435,7 @@ function applySnapshot(data, applyEntries) {
   // Entries: NEVER auto-overwrite local entries unless explicitly told to
   // (entries are the user's live work — losing them is unacceptable)
   if (applyEntries && Array.isArray(data.entries) && JSON.stringify(data.entries) !== JSON.stringify(entries)) {
+    if(typeof _logOp==='function') _logOp('sync_apply', '云端同步：本地记录被 Drive 覆盖（'+(entries?entries.length:0)+' → '+data.entries.length+' 条）', {snap: entries});
     entries = data.entries;
     safeSetItem('mg_entries', JSON.stringify(entries));
     changed = true;
@@ -1403,54 +1475,11 @@ function applySnapshot(data, applyEntries) {
     }
     // If Drive's rates are from a previous day, IGNORE them — local clearing is correct
   }
-  // CRITICAL: Merge charts (never replace) — preserves charts saved on other devices
+  // CRITICAL: Merge charts by UNION of entries — never drop a row that exists on either side.
   if (Array.isArray(data.charts)) {
     var localCharts = JSON.parse(localStorage.getItem('mg_charts')||'[]');
-    var driveCharts = data.charts;
-    var mergedMap = {};
-    // Use NAME as primary merge key to avoid duplicate today-charts from different devices
-    function chartKey(c){ return 'name:' + (c.name||'').trim(); }
-    var _mergeToday = new Date().toISOString().slice(0,10);
-    var _mergeTodayName = (function(){ var n = new Date(); return n.getDate()+'/'+(n.getMonth()+1)+'/'+n.getFullYear(); })();
-    // Add local charts first
-    localCharts.forEach(function(c){ mergedMap[chartKey(c)] = c; });
-    // Drive charts: keep the one with more entries; protect today's locally-rotated chart
-    driveCharts.forEach(function(c){
-      var k = chartKey(c);
-      var existing = mergedMap[k];
-      if(!existing){
-        mergedMap[k] = c;
-      } else {
-        var existingCount = (existing.entries||[]).length;
-        var driveCount = (c.entries||[]).length;
-        // Today's chart: if local was freshly rotated today (rotatedAt = today), protect it
-        // Don't let Drive's stale version (missing rotatedAt or from a different day) overwrite it
-        if((c.name||'').trim() === _mergeTodayName){
-          var localRotated = (existing.rotatedAt === _mergeToday);
-          var driveRotated = (c.rotatedAt === _mergeToday);
-          if(localRotated && !driveRotated && driveCount <= existingCount){
-            return; // keep local's fresh rotation
-          }
-        }
-        if(driveCount > existingCount){
-          mergedMap[k] = c;  // Drive has more entries — prefer it
-        } else if(driveCount === existingCount){
-          // Same count — use newer date
-          var existingDate = existing.date ? new Date(existing.date).getTime() : 0;
-          var driveDate2 = c.date ? new Date(c.date).getTime() : 0;
-          if(driveDate2 >= existingDate) mergedMap[k] = c;
-        }
-        // else: local has more entries → keep local
-      }
-    });
-    var merged = Object.values(mergedMap);
-    // Sort by date descending (newest first)
-    merged.sort(function(a,b){
-      var ad = a.date ? new Date(a.date).getTime() : 0;
-      var bd = b.date ? new Date(b.date).getTime() : 0;
-      return bd - ad;
-    });
-    if(merged.length > 365) merged = merged.slice(0,365);
+    var merged = _mergeChartLists(localCharts, data.charts);
+    _backupBeforeChartMerge(localCharts, merged);  // safety net if any chart would shrink
     safeSetItem('mg_charts', JSON.stringify(merged));
   }
   // Apply CD deletion signatures from Drive (merge with local)
@@ -1464,6 +1493,16 @@ function applySnapshot(data, applyEntries) {
       driveSet.forEach(function(s){ if(merged.indexOf(s) === -1) merged.push(s); });
       localStorage.setItem(k, JSON.stringify(merged));
     });
+  }
+  // CD "dismissed" source refs (v4) — union-merge across devices
+  if (Array.isArray(data.cdDismissed)) {
+    try {
+      var localDis = JSON.parse(localStorage.getItem('mg_cd_dismissed')||'[]');
+      var mergedDis = localDis.slice();
+      data.cdDismissed.forEach(function(s){ if(mergedDis.indexOf(s) === -1) mergedDis.push(s); });
+      if(mergedDis.length > 4000) mergedDis = mergedDis.slice(mergedDis.length-4000);
+      localStorage.setItem('mg_cd_dismissed', JSON.stringify(mergedDis));
+    } catch(e){}
   }
   // CD store merge — local wins, Drive only fills missing chartIds, respects cdSkip
   if (Array.isArray(data.cdStore)) {
@@ -1573,36 +1612,10 @@ var _pushToDrive = debounce(function() {
       return r.ok ? r.json() : null;
     }).then(function(driveData){
       if(driveData && Array.isArray(driveData.charts)){
-        // Merge Drive's charts into our local before pushing — name as key, content-aware
+        // Merge Drive into local by UNION (no row dropped) before pushing the combined state.
         var localCharts = JSON.parse(localStorage.getItem('mg_charts')||'[]');
-        var mergedMap = {};
-        function chartKey(c){ return 'name:' + (c.name||'').trim(); }
-        driveCharts = driveData.charts;
-        driveCharts.forEach(function(c){ mergedMap[chartKey(c)] = c; });
-        localCharts.forEach(function(c){
-          var k = chartKey(c);
-          var existing = mergedMap[k];
-          if(!existing){
-            mergedMap[k] = c;
-          } else {
-            var ec = (existing.entries||[]).length;
-            var lc = (c.entries||[]).length;
-            if(lc > ec){
-              mergedMap[k] = c;  // Local has more entries
-            } else if(lc === ec){
-              var ed = existing.date ? new Date(existing.date).getTime() : 0;
-              var ld = c.date ? new Date(c.date).getTime() : 0;
-              if(ld >= ed) mergedMap[k] = c;
-            }
-          }
-        });
-        var merged = Object.values(mergedMap);
-        merged.sort(function(a,b){
-          var ad = a.date ? new Date(a.date).getTime() : 0;
-          var bd = b.date ? new Date(b.date).getTime() : 0;
-          return bd - ad;
-        });
-        if(merged.length > 365) merged = merged.slice(0,365);
+        var merged = _mergeChartLists(localCharts, driveData.charts);
+        _backupBeforeChartMerge(localCharts, merged);
         safeSetItem('mg_charts', JSON.stringify(merged));
         // CD merge — local always wins (user's deletions must be preserved)
         // We do NOT take Drive's CD entries that don't exist locally, because
@@ -1752,18 +1765,27 @@ function pullFromDrive(cb, applyEntriesHint) {
         if(applyEntriesHint === true){
           shouldApplyEntries = true;  // manual pull — user explicitly requested
         } else {
-          var localEmpty = !entries || entries.length === 0;
-          var localWrite = parseInt(localStorage.getItem('mg_last_write')||'0');
-          var driveWrite = data.savedAt ? new Date(data.savedAt).getTime() : 0;
-          var driveSavedDate = data.savedAt ? new Date(data.savedAt).toISOString().slice(0,10) : '';
-          var todayDateStr = new Date().toISOString().slice(0,10);
-          var driveIsFromToday = (driveSavedDate === todayDateStr);
-          if(localEmpty && driveIsFromToday){
-            shouldApplyEntries = true;  // fresh session today, Drive has today's work
-          } else if(driveWrite > localWrite + 60000 && driveIsFromToday){
-            shouldApplyEntries = true;  // Drive is newer AND from today (another device worked)
+          // Guard: never silently overwrite entries while the user is viewing a
+          // historical chart or just manually loaded one (prevents the "load reverts" bug).
+          var _todayName = (function(){ var n=new Date(); return n.getDate()+'/'+(n.getMonth()+1)+'/'+n.getFullYear(); })();
+          var _viewingHistory = currentChartName && currentChartName.trim() !== _todayName;
+          var _recentManualLoad = _manualChartLoadAt && (Date.now() - _manualChartLoadAt) < 5*60*1000;
+          if(_viewingHistory || _recentManualLoad){
+            shouldApplyEntries = false;
+          } else {
+            var localEmpty = !entries || entries.length === 0;
+            var localWrite = parseInt(localStorage.getItem('mg_last_write')||'0');
+            var driveWrite = data.savedAt ? new Date(data.savedAt).getTime() : 0;
+            var driveSavedDate = data.savedAt ? new Date(data.savedAt).toISOString().slice(0,10) : '';
+            var todayDateStr = new Date().toISOString().slice(0,10);
+            var driveIsFromToday = (driveSavedDate === todayDateStr);
+            if(localEmpty && driveIsFromToday){
+              shouldApplyEntries = true;  // fresh session today, Drive has today's work
+            } else if(driveWrite > localWrite + 60000 && driveIsFromToday){
+              shouldApplyEntries = true;  // Drive is newer AND from today (another device worked)
+            }
+            // If Drive data is from a previous day: never apply entries — daily rotation owns that boundary
           }
-          // If Drive data is from a previous day: never apply entries — daily rotation owns that boundary
         }
         applySnapshot(data, shouldApplyEntries);
         setSyncStatus('online');
@@ -1808,6 +1830,34 @@ function safePullFromDrive() {
         console.warn('safePullFromDrive error:', e);
       });
   });
+}
+
+// ── Background periodic auto-sync (~20s) ──
+// Pulls newer Drive data and merges charts; applies today's entries only when safe
+// (pullFromDrive's internal guards handle timestamps + historical-chart protection).
+// Skips while the user is busy (modal open / typing / just edited) or reviewing history,
+// so it never disrupts active work or pushes a loaded historical chart over today's data.
+var _periodicSyncTimer = null;
+function _startPeriodicSync(){
+  if(_periodicSyncTimer) clearInterval(_periodicSyncTimer);
+  _periodicSyncTimer = setInterval(_periodicSync, 20000);
+}
+function _periodicSync(){
+  if(document.hidden) return;
+  if(!_syncEnabled || !_gdriveToken) return;
+  if(typeof navigator !== 'undefined' && navigator.onLine === false) return;
+  // Don't sync while reviewing a historical chart — `entries` holds that chart, and a
+  // pull would otherwise push it over today's Drive data. User can pull manually.
+  var todayName = (function(){ var n=new Date(); return n.getDate()+'/'+(n.getMonth()+1)+'/'+n.getFullYear(); })();
+  if(currentChartName && currentChartName.trim() !== todayName) return;
+  // Don't disrupt active work: skip if a modal is open or an input/select is focused.
+  if(document.querySelector('.modal-overlay:not(.hidden)')) return;
+  var ae = document.activeElement;
+  if(ae && (ae.tagName==='INPUT' || ae.tagName==='SELECT' || ae.tagName==='TEXTAREA')) return;
+  // Let a just-made local change settle (push is debounced) before pulling.
+  var lastWrite = parseInt(localStorage.getItem('mg_last_write')||'0');
+  if(Date.now() - lastWrite < 12000) return;
+  pullFromDrive(null);  // merge charts + conditionally apply today's newer entries
 }
 
 // ── Google Identity Services token client ──
@@ -2079,8 +2129,6 @@ const ENTRIES_KEY      = 'mg_entries';
 const CD_STORE_KEY     = 'mg_cd_store';
 const RATES_KEY        = 'mg_rates';
 const CHARTS_KEY       = 'mg_charts';
-const UNDO_KEY         = 'mg_undo';
-const REDO_KEY         = 'mg_redo';
 
 var BANK_GROUPS  = ['MBB','PBB','AMB','HLB','RHB','OCBC','CIMB','UOB','HSBC','THB','RP'];
 // Load dynamically-added bank groups from localStorage (added via "unknown bank" prompt)
@@ -2103,6 +2151,33 @@ const DEFAULT_OWNERS = ['良','HOE','平','强发','金元','联发','利丰','�
 var OWNERS_LIST = JSON.parse(localStorage.getItem('mg_owners') || 'null') || [...DEFAULT_OWNERS];
 const DEFAULT_BANKS = ['MBB','PBB','AMB','HLB','RHB','OCBC (MY)','OCBC (SG/IDR)','CIMB','UOB','HSBC','BCA','BRI','KS Bank','TFB','BBL','SCB','MD','其他'];
 var ALL_BANKS_OPTS = JSON.parse(localStorage.getItem('mg_banks')||'null') || [...DEFAULT_BANKS];
+
+// Persistent custom bank -> group map (banks added via Bank Manager / new-customer flow).
+// Lets bankToGroup() resolve user-defined banks (incl. THB/RP) on EVERY reload,
+// instead of only at creation time via forceGroup. Fixes the "null group / row not shown" bug.
+var BANK_GROUP_MAP = (function(){
+  try { return JSON.parse(localStorage.getItem('mg_bank_group_map')||'{}') || {}; }
+  catch(e){ return {}; }
+})();
+function _setBankGroupMapping(bank, group){
+  if(!bank || !group) return;
+  BANK_GROUP_MAP[bank.toUpperCase().trim()] = group;
+  try { localStorage.setItem('mg_bank_group_map', JSON.stringify(BANK_GROUP_MAP)); } catch(e){}
+}
+// Recover banks added before the map existed: for any customer whose bank is NOT
+// recognized by the hardcoded rules, seed the map from the customer's stored group.
+// Only fills genuinely-unknown banks (hardcoded rules always win), so it's safe.
+function _seedBankGroupMapFromCustomers(){
+  if(!Array.isArray(customers)) return;
+  var changed = false;
+  customers.forEach(function(c){
+    if(!c || !c.bank || !c.group) return;
+    var b = c.bank.toUpperCase().trim();
+    if(BANK_GROUP_MAP[b]) return;
+    if(bankToGroup(c.bank) === null){ BANK_GROUP_MAP[b] = c.group; changed = true; }
+  });
+  if(changed){ try { localStorage.setItem('mg_bank_group_map', JSON.stringify(BANK_GROUP_MAP)); } catch(e){} }
+}
 
 // Safe wrapper: returns a guaranteed valid group (defaults unknown to OCBC for legacy data)
 function _bankToGroupSafe(bank, forceGroup) {
@@ -2134,6 +2209,8 @@ function bankToGroup(bank, forceGroup) {
   if (['HSBC','HCBB','HBSC','HSB'].includes(b)) return 'HSBC';
   if (['KS BANK','TFB','SCOM','BANGKOK BANK','SCB','BBL'].includes(b)) return 'THB';
   if (['BCA','BRI','MD'].includes(b)) return 'RP';
+  // Custom banks the user added/classified (Bank Manager or new-customer flow)
+  if (BANK_GROUP_MAP[b]) return BANK_GROUP_MAP[b];
   // Unknown bank — return null so caller can prompt user for group
   return null;
 }
@@ -2183,7 +2260,7 @@ const LABELS = {
     export_label:'导出：',export_act:'📋 ACT',export_yes:'💬 YES',
     export_hs:'📋 HS',export_cash:'💵 CASH',export_bt:'📋 BT HENG',export_full:'📊 完整表格',
     gt_rm:'Grand Total RM',gt_act:'ACT 已分配',gt_yes:'YES 已分配',gt_hs:'HS 已分配',
-    gt_cash:'CASH 已分配',gt_bt:'BT HENG',gt_unalloc:'未分配',
+    gt_cash:'CASH 已分配',gt_bt:'BT HENG',gt_unalloc:'未分配',gt_overpaid:'超付',
     rate_note:'汇率变更后自动重算',
     modal_search_title:'🔍 搜索客户',modal_search_lbl:'输入客户名字前几个字母：',
     modal_search_ph:'例如：YS 或 LENG',modal_amt_title:'💰 输入金额',
@@ -2219,7 +2296,7 @@ const LABELS = {
     export_label:'Export:',export_act:'📋 ACT',export_yes:'💬 YES',
     export_hs:'📋 HS',export_cash:'💵 CASH',export_bt:'📋 BT HENG',export_full:'📊 Full Table',
     gt_rm:'Grand Total RM',gt_act:'ACT Alloc',gt_yes:'YES Alloc',gt_hs:'HS Alloc',
-    gt_cash:'CASH Alloc',gt_bt:'BT HENG',gt_unalloc:'Unallocated',
+    gt_cash:'CASH Alloc',gt_bt:'BT HENG',gt_unalloc:'Unallocated',gt_overpaid:'Overpaid',
     rate_note:'Rates auto-recalculate',
     modal_search_title:'🔍 Search Customer',modal_search_lbl:'Type first few letters:',
     modal_search_ph:'e.g. YS or LENG',modal_amt_title:'💰 Enter Amount',
@@ -2329,8 +2406,31 @@ function convertCur(amt, fromCur, toCur){
 // pushUndo() = snapshot BEFORE a change
 // Always call pushUndo() before modifying entries
 // ======================================================
+// Full reversible state — entries AND the chart link + rates, so undoing a
+// load/clear can't leave you pointing at the wrong chart (the old #1 bug).
+function _snapshotState(){
+  return JSON.stringify({
+    e: entries,
+    cid: (typeof currentChartId !== 'undefined') ? currentChartId : null,
+    cname: (typeof currentChartName !== 'undefined') ? currentChartName : null,
+    r: { sgd:rates.sgd, thb:rates.thb, idr:rates.idr, sgdThb:rates.sgdThb, sgdIdr:rates.sgdIdr }
+  });
+}
+function _restoreState(snapStr){
+  try {
+    var s = JSON.parse(snapStr);
+    if(s && Array.isArray(s.e)){
+      entries = s.e;
+      currentChartId   = (s.cid   !== undefined) ? s.cid   : currentChartId;
+      currentChartName = (s.cname !== undefined) ? s.cname : currentChartName;
+      if(s.r){ rates = _backfillRawRates(Object.assign({}, rates, s.r)); if(typeof populateRateInputs==='function') populateRateInputs(); }
+    } else if(Array.isArray(s)){
+      entries = s;   // legacy entries-only snapshot
+    }
+  } catch(e){ console.warn('_restoreState failed:', e); }
+}
 function pushUndo(){
-  var current = JSON.stringify(entries);
+  var current = _snapshotState();
   // Don't push if identical to last snapshot
   if(undoStack.length > 0 && undoStack[undoStack.length-1] === current) return;
   undoStack.push(current);
@@ -2341,30 +2441,22 @@ function pushUndo(){
 // markUnsaved() defined below in auto-save section
 function undoEntry(){
   if(!undoStack.length) return;
-  // UNDO-1: clear alloc focus state BEFORE renderAll destroys DOM
-  // (prevents stale blur from pushing corrupted snapshot)
+  // Clear alloc focus state BEFORE renderAll destroys DOM (prevents stale blur snapshot)
   _allocFocusSnap = null;
   _allocFocusKey  = null;
-  redoStack.push(JSON.stringify(entries));
-  entries=JSON.parse(undoStack.pop());
-  localStorage.setItem(UNDO_KEY,JSON.stringify(undoStack));
-  localStorage.setItem(REDO_KEY,JSON.stringify(redoStack));
-  // UNDO-3: write to localStorage directly, skip Drive push (undo = local only)
-  safeSetItem(ENTRIES_KEY, JSON.stringify(entries));
-  localStorage.setItem('mg_last_write', Date.now().toString());
+  redoStack.push(_snapshotState());
+  _restoreState(undoStack.pop());
+  saveEntries(true);   // persist + push to Drive (symmetric with redo; survives auto-sync)
   renderAll(); updateUndoBtns();
 }
 function redoEntry(){
   if(!redoStack.length) return;
-  // UNDO-1: clear alloc focus state before renderAll
   _allocFocusSnap = null;
   _allocFocusKey  = null;
-  undoStack.push(JSON.stringify(entries));
-  entries=JSON.parse(redoStack.pop());
-  localStorage.setItem(UNDO_KEY,JSON.stringify(undoStack));
-  localStorage.setItem(REDO_KEY,JSON.stringify(redoStack));
-  // UNDO-2: use skipSnapshot=true to avoid polluting local snapshot pool during redo
-  saveEntries(true); renderAll(); updateUndoBtns();
+  undoStack.push(_snapshotState());
+  _restoreState(redoStack.pop());
+  saveEntries(true);
+  renderAll(); updateUndoBtns();
 }
 function _updateSimpleUndoBtn(){
   var btn = document.getElementById('simple-undo-btn');
@@ -2394,12 +2486,51 @@ function updateUndoBtns(){
 // ======================================================
 function saveEntries(skipSnapshot){
   // Entries auto-pushed to Drive (debounced) so work isn't lost on disconnect/relogin
-  safeSetItem(ENTRIES_KEY, JSON.stringify(entries));
+  var ok = safeSetItem(ENTRIES_KEY, JSON.stringify(entries));
   localStorage.setItem('mg_last_write', Date.now().toString());
   if(!skipSnapshot) saveLocalSnapshot();
   _pushToDrive();
   // Mark as unsaved to trigger save button warning + auto-save timer
   if(typeof markUnsaved === 'function') markUnsaved();
+  return ok;  // false if localStorage write failed (quota) — callers can react
+}
+
+// ======================================================
+// OPERATION LOG (后台操作日志) — durable, human-readable audit trail with
+// one-click recovery. For risky ops we store a compact snapshot of `entries`
+// as it was BEFORE the op, so any accidental loss can be restored.
+// ======================================================
+var OPLOG_KEY = 'mg_oplog';
+function _compactEntry(e){
+  if(!e) return e;
+  return { _id:e._id, name:e.name, bank:e.bank, account:e.account, group:e.group, owner:e.owner,
+           currency:e.currency, amount:e.amount, rmAmount:e.rmAmount,
+           act:e.act, yes:e.yes, hs:e.hs, cash:e.cash, btHeng:e.btHeng,
+           isCD:e.isCD, hidden:e.hidden, sgdPending:e.sgdPending, sgdAmount:e.sgdAmount, cdSource:e.cdSource };
+}
+// type: short code; msg: human text; opts.snap = entries array BEFORE the op (for restore).
+function _logOp(type, msg, opts){
+  opts = opts || {};
+  try {
+    var log = JSON.parse(localStorage.getItem(OPLOG_KEY)||'[]');
+    var rec = { ts: Date.now(), dev: (typeof _deviceId!=='undefined'?_deviceId:''), type: type||'op', msg: msg||'' };
+    if(opts.snap && Array.isArray(opts.snap)){
+      rec.snap = opts.snap.map(_compactEntry);
+      rec.chartName = (typeof currentChartName==='string' ? currentChartName : '') || '';
+      rec.count = opts.snap.length;
+    }
+    log.unshift(rec);
+    if(log.length > 300) log = log.slice(0,300);
+    var str = JSON.stringify(log);
+    // Size guard ~2MB: drop oldest snapshots first, then oldest records.
+    if(str.length > 2000000){
+      for(var i=log.length-1; i>=0 && str.length>2000000; i--){
+        if(log[i].snap){ delete log[i].snap; delete log[i].count; str = JSON.stringify(log); }
+      }
+      while(str.length>2000000 && log.length>50){ log.pop(); str = JSON.stringify(log); }
+    }
+    safeSetItem(OPLOG_KEY, str);
+  } catch(e){ console.warn('_logOp failed:', e); }
 }
 
 function saveLocalSnapshot(){
@@ -2740,6 +2871,7 @@ function renderAll(){
   container.innerHTML='';
   let grandRM=0,grandACT=0,grandYES=0,grandHS=0,grandCASH=0,grandIDR=0,grandBTH=0,grandTHB=0;
   let grandTHBact=0,grandTHByes=0,grandTHBhs=0,grandTHBcash=0;
+  let grandUnder=0,grandOverpaid=0;  // gross under/over allocation in RM-equiv (RM groups + THB→RM; RP excluded)
 
   BANK_GROUPS.forEach(group=>{
     // ALL entries in this group (hidden ones still render but with greyed-out style)
@@ -2843,6 +2975,7 @@ function renderAll(){
       const rowCls=isCD?'cd-row':isOverAlloc?'overpaid':isUnderAlloc?'unallocated':'';
       const nameDisp=entry.name
         +(isCD?`<span class="cd-badge">C/D</span>`:'')
+        +(isOverAlloc?`<span class="overpaid-badge">超付</span>`:'')
         +(isSGDpend?`<span class="sgd-pending-badge">SGD⏳</span>`:'');
 
       const tr=document.createElement('tr');
@@ -2939,10 +3072,20 @@ function renderAll(){
           grandYES  += (entry.yes||0)  * thbRateR;
           grandHS   += (entry.hs||0)   * thbRateR;
           grandCASH += (entry.cash||0) * thbRateR;
+          if(!entry.sgdPending){
+            var _balTHB = (entry.amount||0) - ((entry.act||0)+(entry.yes||0)+(entry.hs||0)+(entry.cash||0));
+            if(_balTHB > 0.005)      grandUnder    += _balTHB * thbRateR;
+            else if(_balTHB < -0.005) grandOverpaid += (-_balTHB) * thbRateR;
+          }
         }
       } else {
         grandRM+=entry.rmAmount||0; grandACT+=entry.act||0;
         grandYES+=entry.yes||0; grandHS+=entry.hs||0; grandCASH+=entry.cash||0;
+        if(!entry.sgdPending){
+          var _balRM = (entry.rmAmount||0) - ((entry.act||0)+(entry.yes||0)+(entry.hs||0)+(entry.cash||0));
+          if(_balRM > 0.005)      grandUnder    += _balRM;
+          else if(_balRM < -0.005) grandOverpaid += (-_balRM);
+        }
       }
     });
 
@@ -2977,8 +3120,15 @@ function renderAll(){
   document.getElementById('gt-cash').textContent=fmtRM(grandCASH);
   document.getElementById('gt-btheng').textContent=fmtN(grandBTH);
   const uel=document.getElementById('gt-unalloc');
-  uel.textContent=fmtRM(Math.abs(unalloc));
-  uel.className='gt-value '+(Math.abs(unalloc)<0.01?'ok':'warn');
+  uel.textContent=fmtRM(grandUnder);
+  uel.className='gt-value '+(grandUnder<0.01?'ok':'warn');
+  var opel=document.getElementById('gt-overpaid');
+  if(opel){
+    opel.textContent=fmtRM(grandOverpaid);
+    opel.style.color = grandOverpaid>0.01 ? 'var(--orange)' : 'var(--text3)';
+  }
+  // Keep the daily-summary bar (date / chart name / counts) in sync after every full render.
+  if(typeof updateDailySummary === 'function') updateDailySummary();
 }
 
 // Track which entry+field is currently being edited (for focus-based undo snapshot)
@@ -2990,7 +3140,7 @@ function allocFocus(id, field){
   var key = id + ':' + field;
   if(_allocFocusKey !== key){
     _allocFocusKey  = key;
-    _allocFocusSnap = JSON.stringify(entries);
+    _allocFocusSnap = _snapshotState();
   }
 }
 
@@ -2998,7 +3148,7 @@ function allocFocus(id, field){
 function allocBlur(id, field){
   var key = id + ':' + field;
   if(_allocFocusKey === key && _allocFocusSnap !== null){
-    var current = JSON.stringify(entries);
+    var current = _snapshotState();
     if(current !== _allocFocusSnap){
       // Entries changed since focus — push pre-edit snapshot onto stack
       if(undoStack.length === 0 || undoStack[undoStack.length-1] !== _allocFocusSnap){
@@ -3080,48 +3230,10 @@ function updateAllocLive(id,field,val){
   updateGrandTotals();
 }
 
-// Update the floating "currently editing" pill (top-right)
-function updateCurrentChartBanner(){
-  var ccbName = document.getElementById('ccb-name');
-  var ccbStatus = document.getElementById('ccb-status');
-  if(!ccbName) return;
-
-  var n = new Date();
-  var todayStr = n.getDate()+'/'+(n.getMonth()+1)+'/'+n.getFullYear();
-  var name = currentChartName ? currentChartName.trim() : (isEng?'(unsaved)':'(未保存)');
-  var isToday = currentChartName && currentChartName.trim() === todayStr;
-
-  ccbName.textContent = name;
-
-  if(isToday){
-    ccbName.style.color = 'var(--accent)';
-    if(ccbStatus){
-      ccbStatus.textContent = isEng ? 'TODAY' : '今日';
-      ccbStatus.style.background = 'rgba(0,212,144,.15)';
-      ccbStatus.style.color = 'var(--green)';
-      ccbStatus.style.display = '';
-    }
-  } else if(currentChartName){
-    ccbName.style.color = 'var(--orange)';
-    if(ccbStatus){
-      ccbStatus.textContent = isEng ? 'HISTORY' : '历史';
-      ccbStatus.style.background = 'rgba(255,167,38,.15)';
-      ccbStatus.style.color = 'var(--orange)';
-      ccbStatus.style.display = '';
-    }
-  } else {
-    ccbName.style.color = 'var(--text3)';
-    if(ccbStatus){
-      ccbStatus.textContent = '';
-      ccbStatus.style.display = 'none';
-    }
-  }
-}
+// (Removed dead updateCurrentChartBanner — the top-right floating pill no longer exists;
+//  current chart name/state is shown in the #daily-summary bar below.)
 
 function updateDailySummary(){
-  // Update the current-chart banner first
-  updateCurrentChartBanner();
-
   var dsDate = document.getElementById('ds-date');
   var dsCount = document.getElementById('ds-count');
   var dsPending = document.getElementById('ds-pending');
@@ -3142,7 +3254,7 @@ function updateDailySummary(){
 
   var visible = (entries||[]).filter(function(e){ return !e.hidden; });
   var totalCount = visible.length;
-  var pendingCount = 0;
+  var pendingCount = 0, overpaidCount = 0;
   visible.forEach(function(e){
     var tot, alc;
     if(e.group==='RP'){
@@ -3156,11 +3268,15 @@ function updateDailySummary(){
       alc = (e.act||0)+(e.yes||0)+(e.hs||0)+(e.cash||0);
     }
     var threshold = e.group==='RP' ? 0.5 : 0.005;
-    if(tot > threshold && Math.abs(tot - alc) > threshold) pendingCount++;
+    var diff = tot - alc;
+    if(diff < -threshold) overpaidCount++;                       // over-allocated (超付)
+    else if(tot > threshold && diff > threshold) pendingCount++; // under-allocated (未分配)
   });
   dsCount.textContent = totalCount;
   dsPending.textContent = pendingCount;
-  var donePct = totalCount > 0 ? Math.round(((totalCount - pendingCount) / totalCount) * 100) : 100;
+  var dsOverpaid = document.getElementById('ds-overpaid');
+  if(dsOverpaid) dsOverpaid.textContent = overpaidCount;
+  var donePct = totalCount > 0 ? Math.round(((totalCount - pendingCount - overpaidCount) / totalCount) * 100) : 100;
   dsDone.textContent = donePct + '%';
   dsDone.style.color = donePct === 100 ? 'var(--green)' :
                        donePct >= 70  ? 'var(--yellow)' : 'var(--red)';
@@ -3168,6 +3284,7 @@ function updateDailySummary(){
 
 function updateGrandTotals(){
   var grandRM=0,grandACT=0,grandYES=0,grandHS=0,grandCASH=0,grandIDR=0,grandBTH=0,grandTHB=0;
+  var grandUnder=0,grandOverpaid=0;  // gross under/over (RM-equiv; RP excluded)
   // Per-group totals for inline TOTAL rows
   var grpTot = {};  // { GROUP: {amt, col1, yes, hs, cash} }
   entries.forEach(function(e){
@@ -3192,6 +3309,11 @@ function updateGrandTotals(){
         grandYES  += (e.yes||0)  * thbRate;
         grandHS   += (e.hs||0)   * thbRate;
         grandCASH += (e.cash||0) * thbRate;
+        if(!e.sgdPending){
+          var _balTHB = (e.amount||0) - ((e.act||0)+(e.yes||0)+(e.hs||0)+(e.cash||0));
+          if(_balTHB > 0.005)      grandUnder    += _balTHB * thbRate;
+          else if(_balTHB < -0.005) grandOverpaid += (-_balTHB) * thbRate;
+        }
       }
       grpTot[g].amt  += e.amount||0;
       grpTot[g].col1 += e.act||0;
@@ -3202,6 +3324,11 @@ function updateGrandTotals(){
       grandRM+=e.rmAmount||0;
       grandACT+=e.act||0;
       grandYES+=e.yes||0; grandHS+=e.hs||0; grandCASH+=e.cash||0;
+      if(!e.sgdPending){
+        var _balRM = (e.rmAmount||0) - ((e.act||0)+(e.yes||0)+(e.hs||0)+(e.cash||0));
+        if(_balRM > 0.005)      grandUnder    += _balRM;
+        else if(_balRM < -0.005) grandOverpaid += (-_balRM);
+      }
       grpTot[g].amt  += e.rmAmount||0;
       grpTot[g].col1 += e.act||0;
       grpTot[g].yes  += e.yes||0;
@@ -3254,7 +3381,6 @@ function updateGrandTotals(){
       headEl.classList.toggle('zero', displayUnalloc < 0.01);
     }
   });
-  var unalloc=grandRM-grandACT-grandYES-grandHS-grandCASH; // RM groups only
   var set=function(id,v){ var el=document.getElementById(id); if(el) el.textContent=v; };
   set('gt-rm',    fmtRM(grandRM));
   set('gt-thb',   'THB '+fmtN(grandTHB));
@@ -3266,8 +3392,13 @@ function updateGrandTotals(){
   set('gt-btheng',fmtN(grandBTH));
   var uel=document.getElementById('gt-unalloc');
   if(uel){
-    uel.textContent=fmtRM(Math.abs(unalloc));
-    uel.className='gt-value '+(Math.abs(unalloc)<0.01?'ok':'warn');
+    uel.textContent=fmtRM(grandUnder);
+    uel.className='gt-value '+(grandUnder<0.01?'ok':'warn');
+  }
+  var opel=document.getElementById('gt-overpaid');
+  if(opel){
+    opel.textContent=fmtRM(grandOverpaid);
+    opel.style.color = grandOverpaid>0.01 ? 'var(--orange)' : 'var(--text3)';
   }
 
   if(typeof updateDailySummary === "function") updateDailySummary();
@@ -3300,6 +3431,7 @@ function deleteEntry(id){
   var idx = typeof id==='number' ? id : entries.findIndex(function(x){return x._id===id;});
   if(idx<0||!entries[idx]) return;
   if(!confirm(t('del_confirm')+': '+entries[idx].name)) return;
+  if(typeof _logOp==='function') _logOp('delete', '删除客户：'+entries[idx].name, {snap: entries});
   pushUndo();
   entries.splice(idx,1);
   saveEntries(); renderAll();
@@ -3332,7 +3464,7 @@ function openEditModal(id){
       </div>
     </div>
     <label>${t('modal_amt_lbl')}</label>
-    <input type="text" inputmode="decimal" id="edit-amt" value="${e.amount||e.rmAmount||0}" placeholder="0.00 或 100+200" oninput="_updateEditAmtCalc()">
+    <input type="text" inputmode="decimal" id="edit-amt" value="${e.amount||e.rmAmount||0}" placeholder="0.00 或 100+200*3" oninput="_updateEditAmtCalc()">
     <div id="edit-amt-calc-preview" style="font-size:11px;color:var(--text3);margin-top:4px;font-family:'IBM Plex Mono',monospace;min-height:14px"></div>
     <label>${t('modal_cur_lbl')}</label>
     <div class="currency-chips">
@@ -3365,6 +3497,7 @@ function confirmEdit(idx){
   const amt=(_parseAmtExpr(document.getElementById('edit-amt').value)||0);
   const owner=document.getElementById('edit-owner').value.trim();
   const cur=modalState.editCur||entries[idx].currency;
+  if(typeof _logOp==='function') _logOp('edit', '编辑客户：'+(entries[idx]?entries[idx].name:''), {snap: entries});
   pushUndo();
   entries[idx].amount=amt;
   entries[idx].currency=cur;
@@ -3449,7 +3582,7 @@ function renderModalStep(){
         <div style="font-size:10px;color:var(--text3);font-family:'IBM Plex Mono',monospace;margin-top:3px">${c.bank} · ${fmtAcct(c.account)}</div>
       </div>
       <label>${t('modal_amt_lbl')}</label>
-      <input type="text" inputmode="decimal" id="amt-input" placeholder="0.00 或 100+200+50" style="font-size:20px;font-weight:700" autofocus oninput="_updateAmtCalc()">
+      <input type="text" inputmode="decimal" id="amt-input" placeholder="0.00 或 100+200*3" style="font-size:20px;font-weight:700" autofocus oninput="_updateAmtCalc()">
       <div id="amt-calc-preview" style="font-size:11px;color:var(--text3);margin-top:4px;font-family:'IBM Plex Mono',monospace;min-height:14px"></div>
       <label style="margin-top:14px">${t('modal_cur_lbl')}</label>
       <div class="currency-chips">
@@ -3756,27 +3889,42 @@ function updateConvPrev(){
     prev.innerHTML='';
   }
 }
-// Safely parse amount input — supports arithmetic like "100+200+50.5" or "500-25"
+// Safely parse amount input — supports arithmetic like "100+200*3", "500-25", "1000/4"
+// Operator precedence: * and / bind tighter than + and -. Divide-by-zero -> NaN.
 // Only allows digits, decimal point, +, -, and whitespace. Rejects anything else.
 function _parseAmtExpr(raw){
   if(!raw) return NaN;
   var s = String(raw).trim();
   if(!s) return NaN;
-  // Reject if contains anything other than digits, ., +, -, spaces
-  if(!/^[0-9+\-.\s]+$/.test(s)) return NaN;
+  // Allow digits, ., + - * / and spaces only
+  if(!/^[0-9+\-*\/.\s]+$/.test(s)) return NaN;
   // Strip whitespace
   s = s.replace(/\s+/g, '');
-  // Parse: split by + and - while keeping signs
-  // First normalize multiple +/-
+  if(s === '') return NaN;
+  // Evaluate with correct precedence: split into additive terms first (* / bind tighter).
+  // Normalize '-' into '+-' so each split piece carries its own sign.
   s = s.replace(/-/g, '+-');  // Convert minus to +-
   if(s.charAt(0) === '+') s = s.substring(1);
-  var parts = s.split('+').filter(function(p){ return p !== ''; });
+  var terms = s.split('+').filter(function(p){ return p !== ''; });
   var total = 0;
-  for(var i=0; i<parts.length; i++){
-    var num = parseFloat(parts[i]);
-    if(isNaN(num)) return NaN;
-    total += num;
+  for(var i=0; i<terms.length; i++){
+    // Within a term, evaluate * and / left-to-right.
+    var factors = terms[i].split(/([*\/])/);  // "-2*3" -> ["-2","*","3"]
+    var val = parseFloat(factors[0]);
+    if(isNaN(val)) return NaN;
+    for(var j=1; j<factors.length; j+=2){
+      var op = factors[j];
+      var n  = parseFloat(factors[j+1]);
+      if(isNaN(n)) return NaN;
+      if(op === '*') val *= n;
+      else if(op === '/'){
+        if(n === 0) return NaN;   // guard divide-by-zero
+        val /= n;
+      }
+    }
+    total += val;
   }
+  if(!isFinite(total)) return NaN;
   return total;
 }
 
@@ -3787,7 +3935,7 @@ function _updateEditAmtCalc(){
   if(!inp || !prev) return;
   var raw = inp.value || '';
   if(!raw.trim()){ prev.textContent = ''; return; }
-  if(/[+\-]/.test(raw.replace(/^-/,''))){
+  if(/[+\-*\/]/.test(raw.replace(/^-/,''))){
     var total = _parseAmtExpr(raw);
     if(isNaN(total)){
       prev.textContent = '⚠️ 无效输入';
@@ -3812,8 +3960,8 @@ function _updateAmtCalc(){
     prev.style.color = 'var(--text3)';
     return;
   }
-  // Show calculation preview only if there's a + or -
-  if(/[+\-]/.test(raw.replace(/^-/,''))){  // strip leading - for negative numbers
+  // Show calculation preview only if there's an operator (+ - * /)
+  if(/[+\-*\/]/.test(raw.replace(/^-/,''))){  // strip leading - for negative numbers
     var total = _parseAmtExpr(raw);
     if(isNaN(total)){
       prev.textContent = '⚠️ ' + (typeof isEng !== 'undefined' && isEng ? 'Invalid expression' : '无效的输入');
@@ -3832,7 +3980,7 @@ function _updateAmtCalc(){
 function confirmAmt(){
   const raw=document.getElementById('amt-input')?.value;
   const amt=_parseAmtExpr(raw);
-  if(!amt||isNaN(amt)||amt<=0){ alert(typeof isEng !== 'undefined' && isEng ? 'Please enter a valid amount (or expression like 100+200)' : '请输入有效金额（或加法表达式如 100+200）'); return; }
+  if(!amt||isNaN(amt)||amt<=0){ alert(typeof isEng !== 'undefined' && isEng ? 'Please enter a valid amount (or expression like 100+200*3)' : '请输入有效金额（或算式如 100+200*3、500/2）'); return; }
   const convertTo = modalState.convertTo;
   const cur = modalState.currency||'RM';
   if(convertTo && convertTo !== cur){
@@ -4013,6 +4161,7 @@ function finalConfirm(){
   entries.push(entry);
   saveEntries();
   markUnsaved();
+  if(typeof _logOp==='function') _logOp('add', '添加客户：'+entry.name+'（'+entry.currency+' '+(Number(entry.amount)||0).toLocaleString()+'）');
   closeModal('modal-add'); renderAll();
   // scroll to the newly added row
   setTimeout(function(){
@@ -4169,6 +4318,8 @@ function _promptUnknownBankGroup(bankName, callback){
       } else {
         resolved = g;  // 'THB' or 'RP'
       }
+      // Persist bank -> group so bankToGroup() resolves it on every future reload
+      _setBankGroupMapping(bankName, resolved);
       modal.remove();
       if(callback) callback(resolved);
     };
@@ -4224,10 +4375,12 @@ function ncOwner(){
 // ═══════════════════════════════════════════════════════════════════════
 // NEW CD SYSTEM (v3) — Computed live from charts. No separate cdStore.
 // ═══════════════════════════════════════════════════════════════════════
-// CD items are derived from charts in CHARTS_KEY at modal-open time.
-// Each entry tracks `cdHidden` flag (synced with chart). No deletion sigs.
-// When user "imports" CD entry, source chart's entry gets cdHidden=true.
-// When user edits source entry's allocation, cdHidden is cleared automatically.
+// CD v4 — fully read-only / self-healing. We NEVER mutate historical chart data.
+// A historical unfinished entry is a CD candidate unless it is:
+//   • "consumed": some live/charted entry carries cdSource pointing back to it
+//     (so if that carried entry is later deleted/cleared, the source AUTO-reappears), or
+//   • "dismissed": the user clicked Remove (stored in mg_cd_dismissed), or
+//   • legacy cdHidden===true (old data, treated as dismissed for back-compat).
 
 // In-memory list shown in CD modal (rebuilt each open)
 let _cdItems = [];
@@ -4249,7 +4402,9 @@ function _cdComputeUnalloc(e){
     totalAmt = e.amount || 0;
     allocSum = (e.act||0) + (e.yes||0) + (e.hs||0) + (e.cash||0);
   } else {
-    totalAmt = e.rmAmount || 0;
+    // Fallback: if rmAmount is missing/0 but it's an RM-currency entry, use amount,
+    // so data-glitch rows aren't silently dropped from C/D.
+    totalAmt = (e.rmAmount && e.rmAmount > 0) ? e.rmAmount : (e.currency === 'RM' ? (e.amount || 0) : 0);
     allocSum = (e.act||0) + (e.yes||0) + (e.hs||0) + (e.cash||0);
   }
   if(totalAmt <= 0) return null;
@@ -4271,28 +4426,63 @@ function _cdSig(e){
   return (e.name||'')+'|'+(e.account||'')+'|'+(e.owner||'')+'|'+(e.group||'')+'|'+(e.amount||0)+'|'+(e.rmAmount||0);
 }
 
-// Build CD candidate list from historical charts (excluding today's chart)
+// A stable ref string for a source entry (used by consumed/dismissed sets).
+function _cdSrcRef(e){ return (e && e._id) ? ('id:'+e._id) : ('sig:'+_cdSig(e)); }
+
+// Set of source refs already carried — derived ONLY from data (self-healing).
+// Scans today's live entries + every chart for entries that carry a cdSource link.
+function _cdConsumedSet(){
+  var set = {};
+  function scan(list){
+    (list||[]).forEach(function(e){
+      if(e && e.cdSource){
+        if(e.cdSource.id)  set['id:'+e.cdSource.id]   = 1;
+        if(e.cdSource.sig) set['sig:'+e.cdSource.sig] = 1;
+      }
+    });
+  }
+  scan(entries);
+  try { JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]').forEach(function(c){ if(c&&Array.isArray(c.entries)) scan(c.entries); }); } catch(e){}
+  return set;
+}
+// Set of source refs the user manually dismissed ("Remove" in the CD list).
+function _cdDismissedSet(){
+  try { var a=JSON.parse(localStorage.getItem('mg_cd_dismissed')||'[]'); var s={}; a.forEach(function(r){ s[r]=1; }); return s; }
+  catch(e){ return {}; }
+}
+function _cdDismiss(refs){
+  try {
+    var a = JSON.parse(localStorage.getItem('mg_cd_dismissed')||'[]');
+    refs.forEach(function(r){ if(r && a.indexOf(r)===-1) a.push(r); });
+    if(a.length > 4000) a = a.slice(a.length-4000);
+    localStorage.setItem('mg_cd_dismissed', JSON.stringify(a));
+  } catch(e){}
+}
+
+// Build CD candidate list from historical charts (excluding today's chart).
 function _cdBuildItems(filterChartId){
   var todayStr = (function(){
     var n = new Date();
     return n.getDate()+'/'+(n.getMonth()+1)+'/'+n.getFullYear();
   })();
   var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
+  var consumed = _cdConsumedSet();
+  var dismissed = _cdDismissedSet();
   var items = [];
   charts.forEach(function(c){
     if(!c || !Array.isArray(c.entries)) return;
     // Skip today's chart — we shouldn't carry-down from today's own work
     if(c.name && c.name.trim() === todayStr) return;
-    // Only skip the currently-loaded chart when it IS today's. Otherwise a chart
-    // loaded for review (e.g. yesterday) would wrongly be excluded, hiding the
-    // very entries the user just added there from C/D.
     if(c.id === currentChartId && currentChartName && currentChartName.trim() === todayStr) return;
-    // Optional filter by specific chart
     if(filterChartId && c.id !== filterChartId) return;
     c.entries.forEach(function(e, eIdx){
       if(!e) return;
       if(e.hidden) return;
-      if(e.cdHidden) return;  // User explicitly hid this from CD
+      if(e.cdHidden) return;                 // legacy hidden flag → treat as dismissed (read-only)
+      var idRef  = _cdSrcRef(e);             // 'id:..' or 'sig:..'
+      var sigRef = 'sig:' + _cdSig(e);
+      if(consumed[idRef] || consumed[sigRef]) return;   // already carried (self-healing)
+      if(dismissed[idRef] || dismissed[sigRef]) return; // user removed it
       var info = _cdComputeUnalloc(e);
       if(!info) return;
       items.push({
@@ -4363,10 +4553,8 @@ function openCDModal(){
     return;
   }
 
-  // Build source selector — default to the previous working day (not "All sources"),
-  // so ancient unfinished entries (which live under "All sources") don't keep
-  // resurfacing. User can still switch to "All sources" or any other day.
-  var defId = _cdDefaultSourceId();
+  // Default to "All sources" so NO unfinished item is ever hidden by default
+  // (correctness > tidiness). User can still narrow to a specific day.
   var totalCount = sources.reduce(function(s,x){return s+x.count;},0);
   var opts = [{ value:'all', label:(isEng?'All sources':'全部来源')+' ('+totalCount+')' }];
   sources.forEach(function(s){
@@ -4375,19 +4563,6 @@ function openCDModal(){
     opts.push({ value:String(s.chartId), label:(s.chartName||dispDate)+' ('+s.count+')' });
   });
   var selVal = 'all';
-  if(defId != null){
-    // If the previous day has candidates it's already in `opts`; if not, add a
-    // (0) option so the default view is still "yesterday only", not "all".
-    if(!opts.some(function(o){ return o.value === String(defId); })){
-      var _charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
-      var dc = _charts.find(function(c){ return String(c.id)===String(defId); });
-      if(dc){
-        var dDate=''; try{ dDate=new Date(dc.date).toLocaleDateString('en-MY'); }catch(_){}
-        opts.splice(1,0,{ value:String(defId), label:(dc.name||dDate)+' (0)' });
-      }
-    }
-    if(opts.some(function(o){ return o.value === String(defId); })) selVal = String(defId);
-  }
   var optsHTML = opts.map(function(o){
     return '<option value="'+o.value+'"'+(o.value===selVal?' selected':'')+'>'+o.label+'</option>';
   }).join('');
@@ -4463,10 +4638,9 @@ function cdSelectAll(){
 function updateCDBadge(){
   var badge = document.getElementById('cd-badge');
   if(!badge) return;
-  // Count only the previous working day (default C/D source), not all 365 days —
-  // otherwise ancient unfinished entries keep the badge permanently lit.
-  var defId = _cdDefaultSourceId();
-  var items = (defId != null) ? _cdBuildItems(defId) : [];
+  // Count ALL outstanding unfinished items (not consumed / not dismissed) across history,
+  // so nothing is ever silently missed.
+  var items = _cdBuildItems(null);
   if(items.length > 0){
     badge.textContent = items.length;
     badge.style.display = '';
@@ -4475,28 +4649,29 @@ function updateCDBadge(){
   }
 }
 
-// Delete (hide) a CD item — sets cdHidden=true on source entry in source chart
+// Ref string for a CD list item (matches consumed/dismissed sets).
+function _cdItemRef(it){ return it && it.entryId ? ('id:'+it.entryId) : ('sig:'+(it?it.sig:'')); }
+
+// "Remove" a CD item from the list — record a dismissal (read-only; never touches history).
 function deleteCDItem(i){
   if(!confirm(isEng?'Remove this C/D item?':'确认移除此 C/D 记录？')) return;
   var item = _cdItems[i];
   if(!item) return;
-  _cdSetHiddenInChart(item.chartId, _cdRef(item), true);
+  _cdDismiss([_cdItemRef(item)]);
   localStorage.setItem('mg_last_write', Date.now().toString());
   _pushToDrive();
+  if(typeof updateCDBadge==='function') updateCDBadge();
   openCDModal();  // re-render
 }
 
-// Delete (hide) all CD items from a specific source chart (or all sources)
+// "Remove" all CD items from a specific source chart (or all sources) via dismissals.
 function deleteCDGroup(){
   var selEl = document.getElementById('cd-source-sel');
   var sel = selEl ? selEl.value : 'all';
 
   if(sel === 'all'){
-    if(!confirm(isEng?'Remove ALL C/D items? (entries stay in source charts, just hidden from C/D list)':'确认移除所有 C/D 记录？（源 chart 中的客户保留，只是不显示在 C/D 列表）')) return;
-    var allItems = _cdBuildItems(null);
-    allItems.forEach(function(it){
-      _cdSetHiddenInChart(it.chartId, _cdRef(it), true);
-    });
+    if(!confirm(isEng?'Remove ALL C/D items? (source charts are untouched; just hidden from the C/D list)':'确认移除所有 C/D 记录？（源历史不变，只是不再显示在 C/D 列表）')) return;
+    _cdDismiss(_cdBuildItems(null).map(_cdItemRef));
   } else {
     var filterId = parseInt(sel);
     if(isNaN(filterId)) filterId = sel;
@@ -4504,47 +4679,13 @@ function deleteCDGroup(){
     if(!srcItems.length){ openCDModal(); return; }
     var srcName = srcItems[0].chartName || '';
     if(!confirm((isEng?'Remove C/D from: ':'移除来自「')+srcName+(isEng?'?':'」的所有 C/D 项？'))) return;
-    srcItems.forEach(function(it){
-      _cdSetHiddenInChart(it.chartId, _cdRef(it), true);
-    });
+    _cdDismiss(srcItems.map(_cdItemRef));
   }
 
   localStorage.setItem('mg_last_write', Date.now().toString());
   _pushToDrive();
+  if(typeof updateCDBadge==='function') updateCDBadge();
   openCDModal();
-}
-
-// Build an identity ref for a CD list item (for stable hide/match)
-function _cdRef(it){
-  return { entryId: it.entryId, sig: it.sig, idx: it.entryIdx };
-}
-
-// Internal: set cdHidden flag on a specific entry in a specific saved chart.
-// `ref` = { entryId, sig, idx } — match by _id first, then signature, then
-// index as a last resort, so async re-sorts/re-saves can't hide the wrong row.
-function _cdSetHiddenInChart(chartId, ref, hidden){
-  try {
-    var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
-    var c = charts.find(function(x){ return String(x.id) === String(chartId); });
-    if(!c || !Array.isArray(c.entries)) return;
-    var target = null;
-    if(ref && ref.entryId){
-      target = c.entries.find(function(e){ return e && e._id === ref.entryId; });
-    }
-    if(!target && ref && ref.sig){
-      target = c.entries.find(function(e){ return e && _cdSig(e) === ref.sig; });
-    }
-    if(!target && ref && typeof ref.idx === 'number'){
-      target = c.entries[ref.idx];
-    }
-    if(!target) return;
-    if(hidden){
-      target.cdHidden = true;
-    } else {
-      delete target.cdHidden;
-    }
-    safeSetItem(CHARTS_KEY, JSON.stringify(charts));
-  } catch(e){ console.warn('_cdSetHiddenInChart failed:', e); }
 }
 
 // Import selected CD items into today's entries
@@ -4560,22 +4701,21 @@ function confirmCD(){
   if(!selectedItems.length){ closeModal('modal-cd'); return; }
 
   pushUndo();
+  var _cdBefore = entries.slice();  // pre-import state for the op-log (restore-to-before)
 
-  // Get yesterday's display date for the C/D tag (for backward-compat naming)
   var yesterday = new Date(Date.now() - 86400000).toLocaleDateString('en-MY',{day:'numeric',month:'numeric'});
 
-  selectedItems.forEach(function(it, iIdx){
+  // Build the new entries first (don't touch `entries` until we know we can save).
+  var added = selectedItems.map(function(it, iIdx){
     var src = it.entry;
     var info = it.info;
-    // Use the actual source chart date for the C/D tag
     var srcDateLabel = '';
-    try {
-      srcDateLabel = new Date(it.chartDate).toLocaleDateString('en-MY',{day:'numeric',month:'numeric'});
-    } catch(_){ srcDateLabel = yesterday; }
+    try { srcDateLabel = new Date(it.chartDate).toLocaleDateString('en-MY',{day:'numeric',month:'numeric'}); }
+    catch(_){ srcDateLabel = yesterday; }
 
     var baseName = (src.name||'').replace(/\s*\[C\/D fr [^\]]+\]/g,'').trim();
     var newEntry = {
-      _id: 'e' + Date.now() + '_' + iIdx + '_' + Math.random().toString(36).slice(2,5),
+      _id: (typeof _genId==='function'? _genId() : ('e'+Date.now()+'_'+iIdx+'_'+Math.random().toString(36).slice(2,5))),
       name: baseName + ' [C/D fr ' + srcDateLabel + ']',
       bank: src.bank,
       account: src.account,
@@ -4584,31 +4724,43 @@ function confirmCD(){
       currency: src.currency || (src.group === 'RP' ? 'IDR' : src.group === 'THB' ? 'THB' : 'RM'),
       amount: info.remaining,
       isCD: true,
+      // Carry-link back to the source — this is how "already carried" is detected.
+      // If this entry is later deleted/cleared, the source auto-reappears in C/D.
+      cdSource: { id: src._id || null, sig: _cdSig(src), chartId: it.chartId, date: it.chartDate },
       act: 0, yes: 0, hs: 0, cash: 0, btHeng: 0
     };
-    // Set rmAmount based on group and currency
     if(newEntry.currency === 'SGD'){
-      newEntry.rmAmount = 0;
-      newEntry.sgdPending = true;
-      newEntry.sgdAmount = info.remaining;
+      newEntry.rmAmount = 0; newEntry.sgdPending = true; newEntry.sgdAmount = info.remaining;
     } else if(newEntry.group === 'RP'){
-      newEntry.rmAmount = 0;  // RP excluded from grand RM
+      newEntry.rmAmount = 0;
     } else if(newEntry.group === 'THB'){
       newEntry.rmAmount = (rates.thb||0) > 0 ? parseFloat((newEntry.amount * rates.thb).toFixed(2)) : 0;
     } else {
       newEntry.rmAmount = newEntry.amount;
     }
-    entries.push(newEntry);
-
-    // Mark source entry as cdHidden in its chart (by stable identity)
-    _cdSetHiddenInChart(it.chartId, _cdRef(it), true);
+    return newEntry;
   });
 
-  saveEntries();
+  // Add + persist + VERIFY. If the save fails (quota), roll back fully so nothing is half-done:
+  // the source items stay in C/D (not consumed) and no data is lost.
+  added.forEach(function(ne){ entries.push(ne); });
+  var ok = safeSetItem(ENTRIES_KEY, JSON.stringify(entries));
+  if(ok === false){
+    entries = entries.filter(function(e){ return added.indexOf(e) === -1; });
+    if(typeof _showErrorToast === 'function') _showErrorToast('⚠️ 存储空间不足：C/D 带入未保存，数据未变动。请到「数据恢复」清理旧备份后重试。');
+    renderAll();
+    return;
+  }
+  localStorage.setItem('mg_last_write', Date.now().toString());
+  if(typeof saveLocalSnapshot === 'function') saveLocalSnapshot();
+  if(typeof markUnsaved === 'function') markUnsaved();
+  if(typeof _logOp === 'function') _logOp('cd_import', '带入 '+added.length+' 条 C/D（'+added.map(function(e){return e.name.replace(/\s*\[C\/D fr [^\]]+\]/,'');}).slice(0,3).join('、')+(added.length>3?' 等':'')+'）', { snap: _cdBefore });
+  _pushToDrive();
   closeModal('modal-cd');
   renderAll();
+  if(typeof updateCDBadge === 'function') updateCDBadge();
   if(typeof _showSuccessToast === 'function'){
-    _showSuccessToast((isEng?'Imported ':'已带入 ')+selectedItems.length+(isEng?' C/D item(s)':' 条 C/D 记录'));
+    _showSuccessToast((isEng?'Imported ':'已带入 ')+added.length+(isEng?' C/D item(s)':' 条 C/D 记录'));
   }
 }
 
@@ -4654,7 +4806,10 @@ function _doSaveChart(name, overwriteId){
     charts.unshift(newChart);
   }
   if(charts.length > 365) charts.pop();
-  safeSetItem(CHARTS_KEY, JSON.stringify(charts));
+  var _chartOk = safeSetItem(CHARTS_KEY, JSON.stringify(charts));
+  if(_chartOk === false && typeof _showErrorToast === 'function'){
+    _showErrorToast('⚠️ 存储空间不足：图表可能未完整保存！请到「数据恢复」清理旧备份，云端仍会尝试同步。');
+  }
   // Force immediate push on Save (bypass debounce)
   if(_syncEnabled && _gdriveToken){
     setSyncStatus('saving');
@@ -4800,12 +4955,18 @@ function openHistory(){
   renderHistoryList(_allCharts);
   document.getElementById('modal-history').classList.remove('hidden');
 }
+// Timestamp of the last manual chart load (History → Load). While recent, async
+// Drive pulls / daily-rotation must NOT auto-apply entries or rotate the chart away,
+// so loading a chart always sticks on the first click.
+var _manualChartLoadAt = 0;
 function loadChart(id){
   // Look up by stable id (not array index) — see renderHistoryList note.
   const charts=JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
   const c=charts.find(function(x){ return String(x.id)===String(id); });
   if(!c) return;
   if(!confirm(isEng?`Load "${c.name}"?`:`载入「${c.name}」？`)) return;
+  if(typeof _logOp==='function') _logOp('load', '载入图表「'+c.name+'」（替换当前 '+entries.length+' 条）', {snap: entries});
+  _manualChartLoadAt = Date.now();
   pushUndo(); entries=JSON.parse(JSON.stringify(c.entries));
   // User manually loaded — mark this chart's date as active (prevents auto-rotation)
   if(c.date){
@@ -4831,6 +4992,7 @@ function deleteChart(id){
 // ======================================================
 function confirmClear(){
   if(!confirm(t('clear_confirm'))) return;
+  if(typeof _logOp==='function') _logOp('clear', '清空今日表格（'+entries.length+' 条）', {snap: entries});
   pushUndo(); entries=[]; saveEntries(); renderAll();
   // CRITICAL: reset chart link — cleared table means starting a new chart
   // Prevents accidentally overwriting yesterday's saved chart on next Save
@@ -5254,7 +5416,7 @@ function _exportForActual(person, section){
     entries = _batchExportCache.slice();
   }
   try {
-    currentExportText = person==='YES' ? buildYesWA(ds, section) : buildAllocText(person,ds);
+    currentExportText = buildPersonText(person, ds, section, isBatchNow);
   } finally {
     if(origForBuild !== null) entries = origForBuild;
   }
@@ -5303,127 +5465,104 @@ function _showYesSectionPicker(){
   document.body.appendChild(modal);
 }
 
-function buildYesWA(ds, section){
-  // section: 'all' | 'rp' | 'rm'
-  if(!section) section = 'all';
-  var lines = [ds + ' CONTRA (AMT)'];
-  var grand = 0;
+// Short per-payer label used in export lines (YES:/ACT:/HS:/CASH:/BT:).
+function _personLabel(person){ return person==='BT HENG' ? 'BT' : person; }
 
-  function pushEntry(idx, e, amtStr){
+// Unified export-text builder for ALL payers.
+//   person : 'YES'|'ACT'|'HS'|'CASH'|'BT HENG'
+//   ds     : date string for the header
+//   section: 'all'|'rm'|'rp'  (RM = everything except RP; used by the YES picker)
+//   batch  : when true, list EVERY (selected) entry with its FULL amount per currency,
+//            regardless of payer field — keeps batch rows and totals on one basis.
+// Format rules:
+//   • RM groups  -> "<PAYER>: RM x" (non-batch) / "AMT: <full>" (batch); "GROUP TOTAL: RM ..."
+//   • RP group   -> "AMT: IDR/SGD <full>", split by currency, "RP TOTAL: IDR ... (+ SGD ...)"
+//   • THB group  -> "AMT: THB <full>", "THB TOTAL: THB ..."
+//   • Each group TOTAL is preceded by a blank line (never glued to the last customer).
+//   • Bottom "GRAND TOTAL <PAYER> (RM)" only when an RM-group section is present and not batch.
+function buildPersonText(person, ds, section, batch){
+  section = section || 'all';
+  var field = person==='BT HENG' ? 'btHeng' : person.toLowerCase();
+  var label = _personLabel(person);
+  var lines = [ds + ' CONTRA (' + person + ')'];
+  var rmGrand = 0;
+  var hasRMsection = false;
+
+  function fullAmtStr(e){
+    if(e.currency==='SGD') return 'SGD '+fmtN(e.amount);
+    if(e.group==='RP') return e.currency==='IDR' ? 'IDR '+(Number(e.amount)||0).toLocaleString() : 'SGD '+fmtN(e.amount);
+    if(e.group==='THB') return 'THB '+fmtN(e.amount||0);
+    return 'RM '+fmtN(e.rmAmount||0);
+  }
+  function pushHead(e, idx){
     if(idx > 0) lines.push('');
     lines.push((idx+1)+'. '+e.name);
     lines.push(e.bank+'  '+fmtAcct(e.account));
-    lines.push('AMT: '+amtStr);
   }
 
   BANK_GROUPS.forEach(function(grp){
-    var isRP  = grp === 'RP';
-    var isTHB = grp === 'THB';
-    // Section filter: rp = only RP group; rm = everything except RP
-    if(section === 'rp' && !isRP) return;
-    if(section === 'rm' && isRP) return;
+    var isRP = grp==='RP', isTHB = grp==='THB';
+    if(section==='rp' && !isRP) return;
+    if(section==='rm' && isRP) return;
+
+    var ge = entries.filter(function(e){
+      if(e.group!==grp || e.hidden) return false;
+      return batch ? true : ((e[field]||0) > 0);
+    });
 
     if(isRP){
-      var rpIDR = entries.filter(function(e){ return e.group==='RP'&&!e.hidden&&e.currency==='IDR'&&(e.yes||0)>0; });
-      if(rpIDR.length){
+      ['IDR','SGD'].forEach(function(cur){
+        var sub = ge.filter(function(e){ return (e.currency||'IDR')===cur; });
+        if(!sub.length) return;
         lines.push('');
-        lines.push('[ RP (IDR) ]');
-        rpIDR.forEach(function(e,i){ pushEntry(i, e, 'IDR '+(Number(e.amount)||0).toLocaleString()); });
-        var totIDR = rpIDR.reduce(function(s,e){ return s+(e.amount||0); },0);
+        lines.push('[ RP ('+cur+') ]');
+        sub.forEach(function(e,i){
+          pushHead(e, i);
+          lines.push('AMT: '+(cur==='IDR' ? 'IDR '+(Number(e.amount)||0).toLocaleString() : 'SGD '+fmtN(e.amount)));
+        });
+        var tot = sub.reduce(function(s,e){ return s+(e.amount||0); },0);
         lines.push('');
-        lines.push('RP TOTAL: IDR '+(Number(totIDR)||0).toLocaleString());
-      }
-      var rpSGD = entries.filter(function(e){ return e.group==='RP'&&!e.hidden&&e.currency==='SGD'&&(e.yes||0)>0; });
-      if(rpSGD.length){
-        lines.push('');
-        lines.push('[ RP (SGD) ]');
-        rpSGD.forEach(function(e,i){ pushEntry(i, e, 'SGD '+fmtN(e.amount)); });
-        var totSGD = rpSGD.reduce(function(s,e){ return s+(e.amount||0); },0);
-        lines.push('');
-        lines.push('RP TOTAL: SGD '+fmtN(totSGD));
-      }
+        lines.push('RP TOTAL: '+(cur==='IDR' ? 'IDR '+(Number(tot)||0).toLocaleString() : 'SGD '+fmtN(tot)));
+      });
       return;
     }
 
-    var ge = entries.filter(function(e){ return e.group===grp&&!e.hidden&&(e.yes||0)>0; });
     if(!ge.length) return;
-
     lines.push('');
     lines.push('[ '+grp+' ]');
     ge.forEach(function(e,i){
-      var amtStr = isTHB ? 'THB '+fmtN(e.amount) : 'RM '+fmtN(e.yes);
-      pushEntry(i, e, amtStr);
-      if(!isTHB) grand += e.yes||0;
-    });
-    if(isTHB){
-      var totTHB = ge.reduce(function(s,e){ return s+(e.amount||0); },0);
-      lines.push('');
-      lines.push(grp+' TOTAL: THB '+fmtN(totTHB));
-    } else {
-      var tot = ge.reduce(function(s,e){ return s+(e.yes||0); },0);
-      lines.push('');
-      lines.push(grp+' TOTAL: '+fmtRM(tot));
-    }
-  });
-
-  lines.push('');
-  lines.push('——————————————');
-  lines.push('GRAND TOTAL AMT (RM): '+fmtRM(grand));
-  return lines.join('\n');
-}
-
-function buildAllocText(person,ds){
-  const field=person==='BT HENG'?'btHeng':person.toLowerCase();
-  var lines = [ds + ' CONTRA — ' + person];
-  var total = 0;
-
-  BANK_GROUPS.forEach(function(grp){
-    var isRP = grp==='RP';
-    var isTHB = grp==='THB';
-    var ge = entries.filter(function(e){ return e.group===grp&&!e.hidden&&(e[field]||0)>0; });
-    if(!ge.length) return;
-
-    lines.push('');
-    lines.push('[ '+grp+' ]');
-    ge.forEach(function(e,i){
-      if(i > 0) lines.push('');           // blank line BETWEEN entries
-      lines.push((i+1)+'. '+e.name);
-      if(isRP){
-        var rpAmt = e.currency==='IDR' ? 'IDR '+(Number(e.amount)||0).toLocaleString() : 'SGD '+fmtN(e.amount);
-        lines.push(e.bank+'  '+fmtAcct(e.account));
-        lines.push('AMT: '+rpAmt);
-      } else if(isTHB){
-        lines.push(e.bank+'  '+fmtAcct(e.account));
-        lines.push('AMT: THB '+fmtN(e.amount));
+      pushHead(e, i);
+      if(isTHB){
+        lines.push('AMT: THB '+fmtN(e.amount||0));
+      } else if(batch){
+        lines.push('AMT: '+fullAmtStr(e));
       } else {
-        lines.push(e.bank+'  '+fmtAcct(e.account));
-        lines.push('AMT: '+fmtRM(e[field]||0));
-        total += e[field]||0;
+        lines.push(label+': RM '+fmtN(e[field]||0));
+        rmGrand += e[field]||0;
+        hasRMsection = true;
       }
     });
 
-    var gt = ge.reduce(function(s,e){ return s+(e[field]||0); },0);
-    var totStr;
-    if(isRP){
-      var rpIDRtot = ge.filter(function(e){return e.currency==='IDR';}).reduce(function(s,e){return s+(e.amount||0);},0);
-      var rpSGDtot = ge.filter(function(e){return e.currency==='SGD';}).reduce(function(s,e){return s+(e.amount||0);},0);
-      var parts = [];
-      if(rpIDRtot>0) parts.push('IDR '+(Number(rpIDRtot)||0).toLocaleString());
-      if(rpSGDtot>0) parts.push('SGD '+fmtN(rpSGDtot));
-      totStr = parts.join(' + ')||'0';
-    } else if(isTHB){
-      var thbTot = ge.reduce(function(s,e){return s+(e.amount||0);},0);
-      totStr = 'THB '+fmtN(thbTot);
+    lines.push('');  // blank line before the group TOTAL
+    if(isTHB){
+      var thbTot = ge.reduce(function(s,e){ return s+(e.amount||0); },0);
+      lines.push(grp+' TOTAL: THB '+fmtN(thbTot));
+    } else if(batch){
+      var rmTot = ge.reduce(function(s,e){ return s+(e.rmAmount||0); },0);
+      lines.push(grp+' TOTAL: RM '+fmtN(rmTot));
     } else {
-      totStr = fmtRM(gt);
+      var fTot = ge.reduce(function(s,e){ return s+(e[field]||0); },0);
+      lines.push(grp+' TOTAL: RM '+fmtN(fTot));
     }
-    lines.push('');                       // blank line before the group TOTAL
-    lines.push(grp+' TOTAL: '+totStr);
   });
 
-  lines.push('');
-  lines.push('——————————————');
-  lines.push('TOTAL '+person+': '+fmtRM(total));
+  // RM grand total — only for non-batch exports that include at least one RM-group section.
+  // RP-only / THB-only exports omit it (their amounts aren't RM).
+  if(!batch && hasRMsection){
+    lines.push('');
+    lines.push('——————————————');
+    lines.push('GRAND TOTAL '+label+' (RM): RM '+fmtN(rmGrand));
+  }
   return lines.join('\n');
 }
 
@@ -5463,7 +5602,9 @@ function downloadExportImg(){
   const todayDs = `${now.getDate()}/${now.getMonth()+1}/${now.getFullYear()}`;
   // Use chart's name (which is its date) if available, so historical exports show correct date
   const ds = (typeof currentChartName === 'string' && currentChartName.trim()) ? currentChartName.trim() : todayDs;
-  const COLS=isYES?['No','Name','Bank','A/C No','AMT']:['No','Name','Bank','A/C No',person];
+  // In batch mode the amount column shows each entry's FULL amount, so label it AMT.
+  const amtColHead = (isYES||isBatch) ? 'AMT' : person;
+  const COLS=['No','Name','Bank','A/C No',amtColHead];
   const rows=[];
 
   BANK_GROUPS.forEach(grp=>{
@@ -5506,7 +5647,8 @@ function downloadExportImg(){
       }
       rows.push({type:'row',no:i+1,name:e.name,bank:e.bank,acct:fmtAcct(e.account),amt,isCD:e.isCD});
     });
-    const gt=ge.reduce((s,e)=>s+(e[field]||0),0);
+    // Batch totals must match the displayed FULL amounts (sum rmAmount), not the payer field.
+    const gt = isBatch ? ge.reduce((s,e)=>s+(e.rmAmount||0),0) : ge.reduce((s,e)=>s+(e[field]||0),0);
     var totVal;
     if(isRP){
       var rpIDRtot2=ge.filter(e=>e.currency==='IDR').reduce((s,e)=>s+(e.amount||0),0);
@@ -5745,6 +5887,7 @@ function handleImport(file){
       if(typeof XLSX==='undefined'){ document.getElementById('import-status').textContent='XLSX library not loaded'; return; }
       var wb=XLSX.read(e.target.result,{type:'array'});
       var imported=0;
+      if(typeof _logOp==='function') _logOp('import', 'Excel 导入前快照', {snap: entries});
       pushUndo();
 
       // Sheet name → group mapping
@@ -6528,6 +6671,29 @@ function _migrateLocalGroups(){
   }
 }
 
+// Generate a reasonably-unique stable entry id.
+function _genId(){ return 'e' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,8); }
+
+// One-time: ensure EVERY entry (live + inside every saved chart) has a stable _id.
+// Stable _id is the foundation for union-merge (no lost rows) and CD source-links.
+function _ensureEntryIds(){
+  if(localStorage.getItem('mg_id_backfill_v1') === '1') return;
+  try {
+    if(Array.isArray(entries)){
+      var liveCh = false;
+      entries.forEach(function(e){ if(e && !e._id){ e._id = _genId(); liveCh = true; } });
+      if(liveCh) safeSetItem(ENTRIES_KEY, JSON.stringify(entries));
+    }
+    var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
+    var ch = false;
+    charts.forEach(function(c){
+      if(c && Array.isArray(c.entries)) c.entries.forEach(function(e){ if(e && !e._id){ e._id = _genId(); ch = true; } });
+    });
+    if(ch) safeSetItem(CHARTS_KEY, JSON.stringify(charts));
+    localStorage.setItem('mg_id_backfill_v1','1');
+  } catch(e){ console.warn('_ensureEntryIds failed:', e); }
+}
+
 function _checkDailyChartRotation(){
   var todayName = _todayDateStr();
   var todayKey = new Date().toISOString().slice(0,10);
@@ -6541,7 +6707,14 @@ function _checkDailyChartRotation(){
 
   if(loadedIsToday){
     localStorage.setItem('mg_last_active_chart_date', todayKey);
-    if(typeof updateCurrentChartBanner === 'function') updateCurrentChartBanner();
+    return;
+  }
+
+  // Guard: if the user just manually loaded a historical chart (History → Load),
+  // do NOT auto-rotate away from it — otherwise a coinciding rotation/pull could
+  // revert the load and force a second click. Stick with the loaded chart.
+  if(_manualChartLoadAt && (Date.now() - _manualChartLoadAt) < 5*60*1000 &&
+     currentChartName && currentChartName.trim() !== todayName){
     return;
   }
 
@@ -6562,7 +6735,6 @@ function _checkDailyChartRotation(){
       if(typeof markSaved === 'function') markSaved();
       if(typeof renderAll === 'function') renderAll();
       console.log('Rotation: loaded today chart "' + todayName + '" from history');
-      if(typeof updateCurrentChartBanner === 'function') updateCurrentChartBanner();
       return;
     }
     // No today chart found — fall through to step 2 to create one
@@ -6588,7 +6760,6 @@ function _checkDailyChartRotation(){
       safeSetItem(CHARTS_KEY, JSON.stringify(existingCharts));
       if(typeof markSaved === 'function') markSaved();
       if(typeof renderAll === 'function') renderAll();
-      if(typeof updateCurrentChartBanner === 'function') updateCurrentChartBanner();
     }
     return;
   }
@@ -6659,7 +6830,6 @@ function _checkDailyChartRotation(){
     // Push to Drive so other devices see today's empty chart too
     if(typeof _pushToDrive === 'function') _pushToDrive();
   }
-  if(typeof updateCurrentChartBanner === 'function') updateCurrentChartBanner();
   if(typeof _showSuccessToast === 'function'){
     setTimeout(function(){
       _showSuccessToast(isEng ? 'Switched to today\'s records (' + todayName + ')' : '已自动切换到今日记录 (' + todayName + ')');
@@ -6748,7 +6918,8 @@ function _checkDailyExcelBackup(){
             charts: JSON.parse(localStorage.getItem('mg_charts')||'[]').slice(0,10),  // last 10 charts
             customers: customers,
             owners: OWNERS_LIST,
-            rates: rates
+            rates: rates,
+            oplog: (function(){ try{ return JSON.parse(localStorage.getItem(OPLOG_KEY)||'[]').slice(0,120); }catch(e){ return []; } })()  // recent ops for cross-device forensics
           });
           var meta = JSON.stringify({
             name: 'mg_daily_backup_'+ds+'.json',
@@ -7628,33 +7799,15 @@ function restoreDriveBackup(fileId, fileName){
       alert('备份文件中没有图表数据');
       return;
     }
-    // Merge backup charts into current local list
+    // Union backup into current local charts: recovers any rows a local chart may have lost,
+    // and adds charts that don't exist locally at all. Never drops existing rows.
     var localCharts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
-    var mergedMap = {};
-    function chartKey(c){ return c.id ? ('id:'+c.id) : ('name:'+(c.name||'').trim()); }
-    localCharts.forEach(function(c){ mergedMap[chartKey(c)] = c; });
-    var added = 0;
-    backup.charts.forEach(function(c){
-      var k = chartKey(c);
-      if(!mergedMap[k]){
-        // Generate new ID to avoid collision
-        var nc = JSON.parse(JSON.stringify(c));
-        nc.id = Date.now() + Math.floor(Math.random()*1000);
-        nc.name = c.name + ' (恢复)';
-        mergedMap[chartKey(nc)] = nc;
-        added++;
-      }
-    });
-    var merged = Object.values(mergedMap);
-    merged.sort(function(a,b){
-      var ad = a.date ? new Date(a.date).getTime() : 0;
-      var bd = b.date ? new Date(b.date).getTime() : 0;
-      return bd - ad;
-    });
-    if(merged.length > 60) merged = merged.slice(0,60);
-    localStorage.setItem(CHARTS_KEY, JSON.stringify(merged));
+    var localNames = {}; localCharts.forEach(function(c){ localNames[(c.name||'').trim()] = 1; });
+    var added = (backup.charts||[]).filter(function(c){ return c && !localNames[(c.name||'').trim()]; }).length;
+    var merged = _mergeChartLists(localCharts, backup.charts);
+    safeSetItem(CHARTS_KEY, JSON.stringify(merged));
     _pushToDrive();
-    alert('已恢复 '+added+' 个图表（其余已存在跳过）');
+    alert('已合并恢复：并入 '+added+' 个新图表，并补回任何缺失条目');
     openRecovery();
   }).catch(function(e){
     alert('恢复失败：'+e.message);
@@ -7697,6 +7850,62 @@ function restoreSnapshot(i){
   alert('已恢复 '+entries.length+' 条记录！');
 }
 
+// ── Operation log UI ──
+function openOpLog(){
+  var s = document.getElementById('oplog-search'); if(s) s.value='';
+  renderOpLog();
+  document.getElementById('modal-oplog').classList.remove('hidden');
+}
+var _OPLOG_LABELS = {
+  add:'➕ 添加', edit:'✏️ 编辑', delete:'🗑 删除', batch_delete:'🗑 批量删除',
+  clear:'🧹 清空', cd_import:'📥 C/D 带入', load:'📂 载入图表', import:'📊 Excel 导入',
+  sync_apply:'☁️ 云端同步覆盖', restore:'⮌ 恢复'
+};
+function renderOpLog(){
+  var el = document.getElementById('oplog-list'); if(!el) return;
+  var q = ((document.getElementById('oplog-search')||{}).value||'').trim().toLowerCase();
+  var log = [];
+  try { log = JSON.parse(localStorage.getItem(OPLOG_KEY)||'[]'); } catch(e){}
+  if(q) log = log.filter(function(r){ return ((r.msg||'')+' '+(r.type||'')).toLowerCase().indexOf(q)>=0; });
+  if(!log.length){ el.innerHTML = '<div style="text-align:center;color:var(--text3);padding:20px">暂无操作记录</div>'; return; }
+  // Need original indices for restore — map filtered back to full list positions
+  var full = [];
+  try { full = JSON.parse(localStorage.getItem(OPLOG_KEY)||'[]'); } catch(e){}
+  el.innerHTML = log.map(function(r){
+    var origIdx = full.indexOf(r);
+    var dt = new Date(r.ts).toLocaleString('en-MY');
+    var label = _OPLOG_LABELS[r.type] || ('• '+(r.type||''));
+    var devTag = (r.dev && typeof _deviceId!=='undefined' && r.dev!==_deviceId) ? '<span style="font-size:9px;color:var(--orange);margin-left:6px">其他设备</span>' : '';
+    var restoreBtn = (r.snap) ? '<button class="tb-btn teal" style="font-size:11px;white-space:nowrap" onclick="restoreFromOplog('+origIdx+')">⮌ 恢复到此操作前</button>' : '';
+    var cntInfo = (typeof r.count==='number') ? ('<span style="color:var(--text3);font-size:10px;margin-left:6px">（前 '+r.count+' 条）</span>') : '';
+    return '<div style="display:flex;align-items:center;gap:10px;padding:9px 6px;border-bottom:1px solid var(--border)">' +
+      '<div style="flex:1;min-width:0">' +
+        '<div style="font-size:13px;font-weight:600">'+label+' <span style="font-weight:400;color:var(--text2)">'+(r.msg||'')+'</span>'+cntInfo+devTag+'</div>' +
+        '<div style="font-size:10px;color:var(--text3);font-family:monospace;margin-top:2px">'+dt+'</div>' +
+      '</div>' + restoreBtn +
+    '</div>';
+  }).join('');
+}
+function restoreFromOplog(i){
+  var log = []; try { log = JSON.parse(localStorage.getItem(OPLOG_KEY)||'[]'); } catch(e){}
+  var rec = log[i];
+  if(!rec || !rec.snap){ return; }
+  if(!confirm('恢复到此操作之前的状态？\n\n'+new Date(rec.ts).toLocaleString('en-MY')+'\n'+(rec.msg||'')+'\n\n（当前 '+entries.length+' 条会先存入撤销，可再撤销）')) return;
+  if(typeof _logOp==='function') _logOp('restore', '从日志恢复到「'+(rec.msg||'')+'」之前', {snap: entries});
+  pushUndo();
+  entries = JSON.parse(JSON.stringify(rec.snap));
+  saveEntries();
+  renderAll();
+  closeModal('modal-oplog');
+  if(typeof updateCDBadge==='function') updateCDBadge();
+  if(typeof _showSuccessToast==='function') _showSuccessToast('已恢复到该操作前：'+entries.length+' 条记录'); else alert('已恢复 '+entries.length+' 条记录');
+}
+function clearOpLog(){
+  if(!confirm('清空全部操作日志？此后将无法从日志恢复历史操作（不影响当前数据与图表）。')) return;
+  localStorage.removeItem(OPLOG_KEY);
+  renderOpLog();
+}
+
 function openBankManager(){
   renderBankList();
   document.getElementById('modal-banks').classList.remove('hidden');
@@ -7706,8 +7915,13 @@ function renderBankList(){
   var el=document.getElementById('bank-list-edit');
   if(!el) return;
   el.innerHTML=ALL_BANKS_OPTS.map(function(b,i){
+    var grp = (b==='其他') ? '' : (bankToGroup(b) || '?');
+    var grpColor = BANK_COLORS[grp] || 'var(--text3)';
+    var grpTag = grp ? '<span style="font-size:10px;font-weight:700;color:'+grpColor+';min-width:46px;text-align:right" title="分组">'+grp+'</span>' : '';
+    var grpBtn = (b==='其他') ? '' : '<button onclick="changeBankGroup('+i+')" style="background:none;border:1px solid var(--border);color:var(--accent);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:12px" title="修改分组">改组</button>';
     return '<div style="display:flex;align-items:center;gap:8px;padding:7px 4px;border-bottom:1px solid var(--border)">' +
       '<span style="flex:1;font-size:13px;font-family:monospace">'+b+'</span>' +
+      grpTag + grpBtn +
       '<button onclick="removeBank('+i+')" style="background:none;border:1px solid var(--border);color:var(--text3);padding:3px 8px;border-radius:4px;cursor:pointer;font-size:12px">删除</button></div>';
   }).join('');
 }
@@ -7716,13 +7930,34 @@ function addBank(){
   var name=(inp?inp.value.trim().toUpperCase():'');
   if(!name) return;
   if(ALL_BANKS_OPTS.includes(name)){ alert('该银行已存在！'); return; }
-  // Insert before '其他'
-  var idx=ALL_BANKS_OPTS.indexOf('其他');
-  if(idx>=0) ALL_BANKS_OPTS.splice(idx,0,name);
-  else ALL_BANKS_OPTS.push(name);
-  localStorage.setItem('mg_banks',JSON.stringify(ALL_BANKS_OPTS));
-  if(inp) inp.value='';
-  renderBankList();
+  var doAdd = function(){
+    var idx=ALL_BANKS_OPTS.indexOf('其他');
+    if(idx>=0) ALL_BANKS_OPTS.splice(idx,0,name);
+    else ALL_BANKS_OPTS.push(name);
+    localStorage.setItem('mg_banks',JSON.stringify(ALL_BANKS_OPTS));
+    if(inp) inp.value='';
+    renderBankList();
+  };
+  // Assign a group. If the bank isn't recognized, ask the user (本地RM / THB / RP)
+  // and persist the mapping so customers on this bank render under the right group.
+  var grp = bankToGroup(name);
+  if(grp === null){
+    _promptUnknownBankGroup(name, function(chosen){
+      if(!chosen) return;   // cancelled — don't add
+      doAdd();              // mapping already persisted inside _promptUnknownBankGroup
+    });
+  } else {
+    doAdd();
+  }
+}
+// Reclassify an existing custom bank into another group (本地RM / THB / RP)
+function changeBankGroup(idx){
+  var name = ALL_BANKS_OPTS[idx];
+  if(!name || name==='其他') return;
+  _promptUnknownBankGroup(name, function(chosen){
+    if(!chosen) return;
+    renderBankList();
+  });
 }
 function removeBank(idx){
   var name=ALL_BANKS_OPTS[idx];
@@ -7951,7 +8186,7 @@ function batchExportText(person){
       _showYesSectionPicker();
     } else {
       var ds = new Date().toLocaleDateString('en-MY',{day:'numeric',month:'numeric',year:'numeric'});
-      currentExportText = buildAllocText(person, ds);
+      currentExportText = buildPersonText(person, ds, 'all', true);
       document.getElementById('export-modal-title').textContent = 'Export — ' + person + ' (批量 '+sel.length+' 条)';
       document.getElementById('export-preview').textContent = currentExportText;
       document.getElementById('modal-export').classList.remove('hidden');
@@ -7966,6 +8201,7 @@ function batchExportPDF(){
   var sel = _getBatchSelectedEntries();
   if(!sel.length){ alert('请先勾选记录'); return; }
   _batchExportCache = sel.slice();   // use THIS selection (not a stale one from a prior batch op)
+  _currentExportState = { isBatch:true, section:'all', person:'BATCH' };
   var orig = entries;
   entries = sel;
   try { exportPDF(); } finally { entries = orig; _batchExportCache = null; }
@@ -7975,6 +8211,7 @@ function batchExportImg(){
   var sel = _getBatchSelectedEntries();
   if(!sel.length){ alert('请先勾选记录'); return; }
   _batchExportCache = sel.slice();
+  _currentExportState = { isBatch:true, section:'all', person:'BATCH' };
   var orig = entries;
   entries = sel;
   // Clear cache after — img/PDF don't open modal-export, so the cache would
@@ -7986,6 +8223,7 @@ function batchExportPDFv2(){
   var sel = _getBatchSelectedEntries();
   if(!sel.length){ alert('请先勾选记录'); return; }
   _batchExportCache = sel.slice();
+  _currentExportState = { isBatch:true, section:'all', person:'BATCH' };
   var orig = entries;
   entries = sel;
   try { exportPDF(); } finally { entries = orig; _batchExportCache = null; }
@@ -8051,6 +8289,7 @@ function toggleSelectAll(cb, group){
 function batchDelete(){
   if(!_batchSelected.size) return;
   if(!confirm((isEng?'Delete '+_batchSelected.size+' entries?':'删除 '+_batchSelected.size+' 条记录？'))) return;
+  if(typeof _logOp==='function') _logOp('batch_delete', '批量删除 '+_batchSelected.size+' 条', {snap: entries});
   pushUndo();
   entries = entries.filter(function(e){ return !_batchSelected.has(e._id); });
   _batchSelected.clear();
@@ -8469,6 +8708,8 @@ function init(){
   updateSettingsLabels();
   updateUndoBtns();
   setFontSize(_fontSize);
+  if(typeof _ensureEntryIds === 'function') _ensureEntryIds();  // stable _id before any sync/merge
+  if(typeof _seedBankGroupMapFromCustomers === 'function') _seedBankGroupMapFromCustomers();
   renderAll();
   applySimpleMode();
   _setupSimpleToggleLongPress();
@@ -8489,13 +8730,15 @@ function init(){
     if(typeof _backfillChartRates === 'function') _backfillChartRates();
     if(typeof _cleanupNullGroups === 'function') _cleanupNullGroups();
     if(typeof _migrateLocalGroups === 'function') _migrateLocalGroups();
+    if(typeof _startPeriodicSync === 'function') _startPeriodicSync();  // background ~20s auto-sync
   }, 2000);
-  // AUTO-PULL DISABLED — only manual pull via 🔄 button
-  // This prevents Drive from ever overwriting local data automatically
-  // On tab visible: push local data to Drive (one-way only)
+  // Background sync: a ~20s periodic pull (see _startPeriodicSync) keeps devices in
+  // sync automatically, with guards that never overwrite active edits or a loaded
+  // historical chart. On tab-visible we also push local + trigger an immediate pull.
   document.addEventListener('visibilitychange', function(){
     if(!document.hidden && _syncEnabled && _gdriveToken){
-      safeDevicePush(); // compare timestamps before pushing
+      safeDevicePush();                 // push local if newer
+      if(typeof _periodicSync === 'function') setTimeout(_periodicSync, 500); // quick catch-up pull
     }
   });
   // Push before page unload (catch browser close/refresh)
