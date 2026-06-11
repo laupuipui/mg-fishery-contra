@@ -584,7 +584,7 @@ body.fs-lg .alloc-input{font-size:14px}
   <!-- Left: core daily actions -->
   <div id="topbar-left">
     <button class="tb-btn yellow" onclick="toggleRates()" data-i="btn_rates">💱 汇率</button>
-    <button class="tb-btn orange" id="btn-cd-tb" onclick="openCDModal()" data-i="btn_cd">C/D 带入 <span id="cd-badge" class="cd-badge" style="display:none">0</span></button>
+    <button class="tb-btn orange" id="btn-cd-tb" onclick="openCDModal()"><span data-i="btn_cd">C/D 带入</span> <span id="cd-badge" class="cd-badge" style="display:none">0</span></button>
     <button class="tb-btn green" onclick="saveChart()" data-i="btn_new_chart" id="btn-save">💾 Save</button>
     <button class="tb-btn" id="btn-save-as" onclick="saveChartAs()" style="color:var(--green);border-color:rgba(0,212,144,.3);font-size:10px;padding:5px 7px" title="Save As">As</button>
     <button class="tb-btn icon" id="btn-undo" onclick="undoEntry()" disabled title="Undo">↩</button>
@@ -3157,6 +3157,11 @@ function allocBlur(id, field){
       }
       redoStack = [];
       updateUndoBtns();
+      // Light op-log entry (no snapshot — Undo already covers immediate restore)
+      if(typeof _logOp === 'function'){
+        var _ae = entries.find(function(x){ return x._id===id; });
+        _logOp('alloc', '调整分配：'+((_ae&&_ae.name)||'')+' · '+String(field).toUpperCase());
+      }
     }
     _allocFocusSnap = null;
     _allocFocusKey  = null;
@@ -3416,6 +3421,7 @@ function quickAlloc(id, field){
   // THB alloc fields use THB amount; RP uses IDR amount; others use rmAmount
   const total = (isRP || isTHB) ? (e.amount||0) : (e.rmAmount||0);
   if(!total) return;
+  if(typeof _logOp === 'function') _logOp('alloc', '全额分配：'+(e.name||'')+' · '+String(field==='act'&&isRP?'BT':field).toUpperCase());
   pushUndo();
   if(isRP){
     e.btHeng=0; e.yes=0; e.hs=0; e.cash=0;
@@ -4759,6 +4765,20 @@ function confirmCD(){
   closeModal('modal-cd');
   renderAll();
   if(typeof updateCDBadge === 'function') updateCDBadge();
+  // Scroll to the first imported row and briefly highlight all new rows so they're easy to find.
+  setTimeout(function(){
+    var first = document.querySelector('tr[data-entry-id="'+added[0]._id+'"]');
+    if(first) first.scrollIntoView({behavior:'smooth', block:'center'});
+    added.forEach(function(ne){
+      var tr = document.querySelector('tr[data-entry-id="'+ne._id+'"]');
+      if(tr){
+        tr.style.transition = 'background .3s';
+        var orig = tr.style.background;
+        tr.style.background = 'rgba(255,201,60,.45)';
+        setTimeout(function(){ tr.style.background = orig; }, 1800);
+      }
+    });
+  }, 120);
   if(typeof _showSuccessToast === 'function'){
     _showSuccessToast((isEng?'Imported ':'已带入 ')+added.length+(isEng?' C/D item(s)':' 条 C/D 记录'));
   }
@@ -4834,6 +4854,7 @@ function _doSaveChart(name, overwriteId){
   // Track active chart's date for daily rotation
   localStorage.setItem('mg_last_active_chart_date', new Date().toISOString().slice(0,10));
   if(typeof markSaved === 'function') markSaved();
+  if(typeof _logOp === 'function') _logOp('save', '保存图表：'+trimName+'（'+entries.length+' 条）');
 
   // CD generation removed — CD is now computed live from charts when CD modal opens.
   // (No more separate cdStore; no race conditions; cross-device automatic via chart sync.)
@@ -7859,7 +7880,7 @@ function openOpLog(){
 var _OPLOG_LABELS = {
   add:'➕ 添加', edit:'✏️ 编辑', delete:'🗑 删除', batch_delete:'🗑 批量删除',
   clear:'🧹 清空', cd_import:'📥 C/D 带入', load:'📂 载入图表', import:'📊 Excel 导入',
-  sync_apply:'☁️ 云端同步覆盖', restore:'⮌ 恢复'
+  sync_apply:'☁️ 云端同步覆盖', restore:'⮌ 恢复', save:'💾 保存', autosave:'💾 自动保存', alloc:'✏️ 分配'
 };
 function renderOpLog(){
   var el = document.getElementById('oplog-list'); if(!el) return;
@@ -8711,6 +8732,7 @@ function init(){
   if(typeof _ensureEntryIds === 'function') _ensureEntryIds();  // stable _id before any sync/merge
   if(typeof _seedBankGroupMapFromCustomers === 'function') _seedBankGroupMapFromCustomers();
   renderAll();
+  if(typeof updateCDBadge === 'function') updateCDBadge();  // show pending C/D count on load
   applySimpleMode();
   _setupSimpleToggleLongPress();
   _setupAutoSaveTriggers();
@@ -8731,6 +8753,7 @@ function init(){
     if(typeof _cleanupNullGroups === 'function') _cleanupNullGroups();
     if(typeof _migrateLocalGroups === 'function') _migrateLocalGroups();
     if(typeof _startPeriodicSync === 'function') _startPeriodicSync();  // background ~20s auto-sync
+    if(typeof updateCDBadge === 'function') updateCDBadge();  // refresh badge after rotation/sync
   }, 2000);
   // Background sync: a ~20s periodic pull (see _startPeriodicSync) keeps devices in
   // sync automatically, with guards that never overwrite active edits or a loaded
