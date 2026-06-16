@@ -580,6 +580,12 @@ body.fs-lg .alloc-input{font-size:14px}
     border:1px solid rgba(255,201,60,.4);transition:all .3s;
     white-space:nowrap;
   ">⏳ 连接中</button>
+  <button id="monitor-status" onclick="openMonitorReport()" title="监视系统：持续检查数据正确性" style="
+    font-family:'IBM Plex Mono',monospace;font-size:11px;font-weight:600;
+    padding:5px 10px;border-radius:5px;flex-shrink:0;cursor:pointer;
+    background:rgba(0,212,144,.12);color:var(--green);
+    border:1px solid rgba(0,212,144,.3);transition:all .3s;white-space:nowrap;
+  ">🛡 正常</button>
 
   <!-- Left: core daily actions -->
   <div id="topbar-left">
@@ -756,8 +762,22 @@ body.fs-lg .alloc-input{font-size:14px}
     <div id="cd-list"></div>
     <div class="btn-row">
       <button class="btn-secondary" onclick="closeModal('modal-cd')" data-i="cancel">取消</button>
+      <button class="tb-btn teal" onclick="cdCompareReport()" style="white-space:nowrap" title="核对昨天来源与今日已带入的金额是否一致">🔍 核对带入</button>
       <button class="btn-primary" onclick="confirmCD()" data-i="cd_confirm_btn">带入选中项目</button>
     </div>
+  </div>
+</div>
+
+<!-- ═══ C/D RECONCILIATION REPORT MODAL ═══ -->
+<div id="modal-cd-compare" class="modal-overlay hidden">
+  <div class="modal wide" style="max-width:680px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+      <h2>🔍 C/D 核对</h2>
+      <button onclick="closeModal('modal-cd-compare')" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--text3)">×</button>
+    </div>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:10px">对比「来源未完成项」与「今日已带入」的金额是否一致,以及有没有遗漏。纯查看,不改数据。</p>
+    <div id="cd-compare-body" style="max-height:460px;overflow-y:auto"></div>
+    <div class="btn-row"><button class="btn-secondary" onclick="closeModal('modal-cd-compare')">关闭</button></div>
   </div>
 </div>
 
@@ -1121,6 +1141,23 @@ body.fs-lg .alloc-input{font-size:14px}
   </div>
 </div>
 
+<!-- ═══ MONITOR REPORT MODAL ═══ -->
+<div id="modal-monitor" class="modal-overlay hidden">
+  <div class="modal wide" style="max-width:620px">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+      <h2>🛡 监视系统</h2>
+      <button onclick="closeModal('modal-monitor')" style="background:none;border:none;font-size:22px;cursor:pointer;color:var(--text3)">×</button>
+    </div>
+    <p style="font-size:12px;color:var(--text2);margin-bottom:10px">监视系统每几秒检查一次数据正确性:明确的错误自动修复(可在操作日志撤销),判不准的列在下方等你决定。</p>
+    <div id="monitor-body" style="max-height:460px;overflow-y:auto"></div>
+    <div class="btn-row">
+      <button class="btn-secondary" onclick="closeModal('modal-monitor')">关闭</button>
+      <button class="tb-btn teal" onclick="_monitorScan('manual');renderMonitorReport()" style="white-space:nowrap">🔄 立即检查</button>
+      <button class="tb-btn" onclick="openOpLog()" style="white-space:nowrap">📜 查看/撤销修复记录</button>
+    </div>
+  </div>
+</div>
+
 <!-- CUSTOMER HISTORY MODAL -->
 <div id="modal-cust-hist" class="modal-overlay hidden">
   <div class="modal wide" style="max-width:560px">
@@ -1343,6 +1380,50 @@ function debounce(fn, ms) {
   var t; return function() { clearTimeout(t); t = setTimeout(fn, ms); };
 }
 
+// ======================================================
+// DELETION TOMBSTONES — make deletions stick across devices.
+// mg_tombstones = { entryId: deletedAt_ts }. A tombstoned _id must NOT reappear
+// anywhere (live entries or charts). This is the ground truth the monitor enforces.
+// ======================================================
+var TOMBSTONE_KEY = 'mg_tombstones';
+function _getTombstones(){
+  try { return JSON.parse(localStorage.getItem(TOMBSTONE_KEY)||'{}') || {}; }
+  catch(e){ return {}; }
+}
+function _saveTombstones(tomb){
+  try {
+    // prune: keep most-recent 5000
+    var ids = Object.keys(tomb);
+    if(ids.length > 5000){
+      ids.sort(function(a,b){ return tomb[a]-tomb[b]; });  // oldest first
+      ids.slice(0, ids.length-5000).forEach(function(id){ delete tomb[id]; });
+    }
+    safeSetItem(TOMBSTONE_KEY, JSON.stringify(tomb));
+  } catch(e){}
+}
+// Record one or more deleted entry ids (re-added customers get NEW ids, so this is safe).
+function _addTombstones(ids){
+  if(!ids || !ids.length) return;
+  var tomb = _getTombstones();
+  var now = Date.now();
+  ids.forEach(function(id){ if(id) tomb[id] = now; });
+  _saveTombstones(tomb);
+}
+function _isTombstoned(id){
+  if(!id) return false;
+  var tomb = _getTombstones();
+  return Object.prototype.hasOwnProperty.call(tomb, id);
+}
+// If the user genuinely re-loads/restores a state that should contain a tombstoned id,
+// clear that tombstone (e.g. op-log restore). Used to avoid the monitor fighting a restore.
+function _clearTombstones(ids){
+  if(!ids || !ids.length) return;
+  var tomb = _getTombstones();
+  var changed = false;
+  ids.forEach(function(id){ if(id && tomb[id]!==undefined){ delete tomb[id]; changed=true; } });
+  if(changed) _saveTombstones(tomb);
+}
+
 // ── Build the full data snapshot ──
 function buildSnapshot() {
   // Collect all CD deletion signatures (sync across devices)
@@ -1363,6 +1444,7 @@ function buildSnapshot() {
     cdStore:   [],  // Deprecated in v3; CD is computed live from charts
     cdDeleted: cdDeleted,
     cdDismissed: (function(){ try{ return JSON.parse(localStorage.getItem('mg_cd_dismissed')||'[]'); }catch(e){ return []; } })(),
+    tombstones: _getTombstones(),   // deleted ids — so deletions propagate across devices
     savedAt:   new Date().toISOString()
   };
 }
@@ -1375,12 +1457,22 @@ function _entryKey(e){ return (e && e._id) ? ('id:'+e._id) : ('sig:'+(typeof _cd
 // chart with the newer date (more likely to carry later allocations). Never drops a unique row.
 function _mergeChartPair(a, b){
   if(!a) return b; if(!b) return a;
+  var tomb = _getTombstones();   // deleted ids must not be resurrected by the union
   var aNewer = (new Date(a.date||0).getTime()) >= (new Date(b.date||0).getTime());
   var primary = aNewer ? a : b;        // metadata + conflict winner
   var secondary = aNewer ? b : a;
   var byKey = {}, order = [];
-  (primary.entries||[]).forEach(function(e){ if(!e) return; var k=_entryKey(e); if(!(k in byKey)){byKey[k]=e;order.push(k);} else {byKey[k]=e;} });
-  (secondary.entries||[]).forEach(function(e){ if(!e) return; var k=_entryKey(e); if(!(k in byKey)){byKey[k]=e;order.push(k);} });
+  function add(list, isPrimary){
+    (list||[]).forEach(function(e){
+      if(!e) return;
+      if(e._id && tomb[e._id]) return;   // tombstoned → drop (deletion wins)
+      var k=_entryKey(e);
+      if(!(k in byKey)){ byKey[k]=e; order.push(k); }
+      else if(isPrimary){ byKey[k]=e; }
+    });
+  }
+  add(primary.entries, true);
+  add(secondary.entries, false);
   var mergedEntries = order.map(function(k){ return byKey[k]; });
   return Object.assign({}, primary, { entries: mergedEntries });
 }
@@ -1441,10 +1533,7 @@ function applySnapshot(data, applyEntries) {
     changed = true;
     // Only link to TODAY's chart — never link to historical charts (rotation will handle stale entries)
     if(Array.isArray(data.charts) && entries.length > 0){
-      var todayName_ = (function(){
-        var n = new Date();
-        return n.getDate()+'/'+(n.getMonth()+1)+'/'+n.getFullYear();
-      })();
+      var todayName_ = _todayDateStr();
       var todayMatch = data.charts.find(function(c){ return c.name && c.name.trim() === todayName_; });
       if(todayMatch && JSON.stringify(todayMatch.entries||[]) === JSON.stringify(entries)){
         currentChartId = todayMatch.id;
@@ -1504,6 +1593,17 @@ function applySnapshot(data, applyEntries) {
       localStorage.setItem('mg_cd_dismissed', JSON.stringify(mergedDis));
     } catch(e){}
   }
+  // Deletion tombstones — union-merge by max timestamp (so a delete on any device wins).
+  if (data.tombstones && typeof data.tombstones === 'object') {
+    try {
+      var localTomb = _getTombstones();
+      Object.keys(data.tombstones).forEach(function(id){
+        var ts = data.tombstones[id];
+        if(typeof ts === 'number' && (!localTomb[id] || ts > localTomb[id])) localTomb[id] = ts;
+      });
+      _saveTombstones(localTomb);
+    } catch(e){}
+  }
   // CD store merge — local wins, Drive only fills missing chartIds, respects cdSkip
   if (Array.isArray(data.cdStore)) {
     var localCD = JSON.parse(localStorage.getItem('mg_cd_store')||'[]');
@@ -1544,6 +1644,8 @@ function applySnapshot(data, applyEntries) {
   if(typeof _checkDailyChartRotation === 'function'){
     setTimeout(_checkDailyChartRotation, 100);
   }
+  // Monitor gets the LAST word after every sync — strips any resurrected/deleted rows etc.
+  if(typeof _monitorScan === 'function'){ setTimeout(function(){ _monitorScan('sync'); }, 150); }
 }
 
 // ── Create/update backup file in Drive ──
@@ -1767,7 +1869,7 @@ function pullFromDrive(cb, applyEntriesHint) {
         } else {
           // Guard: never silently overwrite entries while the user is viewing a
           // historical chart or just manually loaded one (prevents the "load reverts" bug).
-          var _todayName = (function(){ var n=new Date(); return n.getDate()+'/'+(n.getMonth()+1)+'/'+n.getFullYear(); })();
+          var _todayName = _todayDateStr();
           var _viewingHistory = currentChartName && currentChartName.trim() !== _todayName;
           var _recentManualLoad = _manualChartLoadAt && (Date.now() - _manualChartLoadAt) < 5*60*1000;
           if(_viewingHistory || _recentManualLoad){
@@ -1848,7 +1950,7 @@ function _periodicSync(){
   if(typeof navigator !== 'undefined' && navigator.onLine === false) return;
   // Don't sync while reviewing a historical chart — `entries` holds that chart, and a
   // pull would otherwise push it over today's Drive data. User can pull manually.
-  var todayName = (function(){ var n=new Date(); return n.getDate()+'/'+(n.getMonth()+1)+'/'+n.getFullYear(); })();
+  var todayName = _todayDateStr();
   if(currentChartName && currentChartName.trim() !== todayName) return;
   // Don't disrupt active work: skip if a modal is open or an input/select is focused.
   if(document.querySelector('.modal-overlay:not(.hidden)')) return;
@@ -1858,6 +1960,136 @@ function _periodicSync(){
   var lastWrite = parseInt(localStorage.getItem('mg_last_write')||'0');
   if(Date.now() - lastWrite < 12000) return;
   pullFromDrive(null);  // merge charts + conditionally apply today's newer entries
+}
+
+// ======================================================
+// MONITOR SYSTEM (监视系统) — supervisory invariant checker + SAFE auto-repair.
+// Runs on a timer + right after every sync apply. Enforces correctness rules using
+// the tombstone registry + structural invariants. Every auto-fix is snapshotted,
+// logged ('monitor_fix', undoable) and rate-limited by a circuit breaker.
+// ======================================================
+var _monitorState = { fixes:0, flags:0, lastFlags:[], recentFix:{}, paused:{}, lastRun:0 };
+var _monitorTimer = null;
+function _startMonitor(){
+  if(_monitorTimer) clearInterval(_monitorTimer);
+  _monitorTimer = setInterval(function(){ _monitorScan('timer'); }, 5000);
+}
+// circuit breaker: suppress a fix if the same issue recurs >=3x within 60s (loop guard)
+function _monitorBreaker(key){
+  var now = Date.now();
+  var arr = (_monitorState.recentFix[key]||[]).filter(function(t){ return now-t < 60000; });
+  arr.push(now);
+  _monitorState.recentFix[key] = arr;
+  if(arr.length >= 3){ _monitorState.paused[key] = now; return true; }
+  return false;
+}
+function _monitorScan(reason){
+  if(!Array.isArray(entries)) return;
+  // Never interfere with active editing.
+  if(document.querySelector('.modal-overlay:not(.hidden)')) return;
+  var ae = document.activeElement;
+  if(ae && (ae.tagName==='INPUT'||ae.tagName==='SELECT'||ae.tagName==='TEXTAREA')) return;
+  _monitorState.lastRun = Date.now();
+
+  var tomb = _getTombstones();
+  var before = null;            // lazy: only snapshot if we actually change something
+  var fixed = [];               // human descriptions
+  var flags = [];               // {key,msg} needing user decision
+  var seen = {};
+  var next = [];
+  var _chartIdSet = (function(){ try { var s={}; JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]').forEach(function(c){ if(c) s[String(c.id)]=1; }); return s; } catch(e){ return {}; } })();
+  function ensureSnap(){ if(before===null) before = entries.map(_compactEntry); }
+
+  for(var i=0;i<entries.length;i++){
+    var e = entries[i];
+    if(!e) { ensureSnap(); continue; }   // drop null holes
+    // (1) tombstone enforcement — a deleted id reappeared (sync resurrection)
+    if(e._id && tomb[e._id]){
+      var bkey='tomb:'+e._id;
+      if(_monitorBreaker(bkey)){ flags.push({key:bkey,msg:'记录「'+(e.name||e._id)+'」反复被带回 — 已暂停自动删除,请你确认是删还是留'}); next.push(e); continue; }
+      ensureSnap(); fixed.push('剔除已删除却又出现的记录：'+(e.name||e._id)); continue;
+    }
+    // (2) missing / duplicate _id
+    if(!e._id){ ensureSnap(); e._id=_genId(); fixed.push('补全缺失ID：'+(e.name||'')); }
+    if(seen[e._id]){ ensureSnap(); e._id=_genId(); fixed.push('修复重复ID：'+(e.name||'')); }
+    seen[e._id]=1;
+    // (3) invalid group
+    if(BANK_GROUPS.indexOf(e.group) < 0){
+      var ng=(typeof _bankToGroupSafe==='function')?_bankToGroupSafe(e.bank):'OCBC';
+      if(ng && ng!==e.group){ ensureSnap(); e.group=ng; fixed.push('修正非法分组：'+(e.name||'')+' → '+ng); }
+    }
+    // (4) negative allocations
+    ['act','yes','hs','cash','btHeng'].forEach(function(fld){
+      if(typeof e[fld]==='number' && e[fld] < 0){ ensureSnap(); e[fld]=0; fixed.push('负数分配归零：'+(e.name||'')+' · '+fld.toUpperCase()); }
+    });
+    // (5) rmAmount consistency (skip SGD-pending)
+    if(!e.sgdPending && e.currency!=='SGD'){
+      if(e.group==='RP'){
+        if((e.rmAmount||0)!==0){ ensureSnap(); e.rmAmount=0; fixed.push('RP rmAmount 归零：'+(e.name||'')); }
+      } else if(e.group==='THB'){
+        var thbR=(rates && rates.thb>0)?rates.thb:0;
+        if(thbR>0){ var exp=parseFloat(((e.amount||0)*thbR).toFixed(2)); if(Math.abs((e.rmAmount||0)-exp)>0.05){ ensureSnap(); e.rmAmount=exp; fixed.push('THB rmAmount 重算：'+(e.name||'')); } }
+      } else if(e.currency==='RM' || e.currency===undefined){
+        var amt=e.amount||0;
+        if(amt>0 && Math.abs((e.rmAmount||0)-amt)>0.005){ ensureSnap(); e.rmAmount=amt; fixed.push('RM rmAmount 重算：'+(e.name||'')); }
+      }
+    }
+    // (6) cdSource integrity — FLAG only. Only a genuine inconsistency: the source CHART
+    // still exists but the source row is gone. (If the whole chart aged out, that's expected.)
+    if(e.cdSource && e.cdSource.chartId && _chartIdSet[String(e.cdSource.chartId)] &&
+       typeof _cdFindSource==='function' && !_cdFindSource(e.cdSource)){
+      flags.push({key:'cdsrc:'+e._id, msg:'带入记录「'+(typeof _stripCDTag==='function'?_stripCDTag(e.name||''):(e.name||''))+'」的来源行不见了,请核对'});
+    }
+    next.push(e);
+  }
+
+  if(before!==null){
+    entries = next;
+    if(typeof _logOp==='function') _logOp('monitor_fix', '监视系统自动修复 '+fixed.length+' 处：'+fixed.slice(0,3).join('；')+(fixed.length>3?(' 等共'+fixed.length+'处'):''), {snap: before});
+    safeSetItem(ENTRIES_KEY, JSON.stringify(entries));
+    localStorage.setItem('mg_last_write', Date.now().toString());
+    if(typeof _pushToDrive==='function') _pushToDrive();
+    if(typeof renderAll==='function') renderAll();
+    _monitorState.fixes += fixed.length;
+  }
+  _monitorState.lastFlags = flags;
+  _monitorState.flags = flags.length;
+  if(typeof _updateMonitorIndicator==='function') _updateMonitorIndicator(before!==null);
+}
+function _updateMonitorIndicator(justFixed){
+  var el = document.getElementById('monitor-status');
+  if(!el) return;
+  var flags = _monitorState.flags||0;
+  if(flags > 0){
+    el.textContent = '🔴 '+flags+' 待确认';
+    el.style.background='rgba(255,61,82,.12)'; el.style.color='var(--red)'; el.style.borderColor='rgba(255,61,82,.4)';
+  } else if(_monitorState.fixes > 0){
+    el.textContent = '🟡 已修复 '+_monitorState.fixes;
+    el.style.background='rgba(255,201,60,.12)'; el.style.color='var(--yellow)'; el.style.borderColor='rgba(255,201,60,.4)';
+  } else {
+    el.textContent = '🛡 正常';
+    el.style.background='rgba(0,212,144,.12)'; el.style.color='var(--green)'; el.style.borderColor='rgba(0,212,144,.3)';
+  }
+  if(justFixed){ el.style.transform='scale(1.08)'; setTimeout(function(){ el.style.transform='scale(1)'; }, 250); }
+}
+function openMonitorReport(){ _monitorScan('open'); renderMonitorReport(); document.getElementById('modal-monitor').classList.remove('hidden'); }
+function renderMonitorReport(){
+  var body=document.getElementById('monitor-body'); if(!body) return;
+  var flags=_monitorState.lastFlags||[];
+  var html='';
+  if(flags.length===0){
+    html+='<div style="padding:12px 14px;border-radius:8px;margin-bottom:12px;font-weight:700;background:rgba(0,212,144,.12);color:var(--green)">✅ 一切正常 — 本次检查没有发现需要你决定的问题。</div>';
+  } else {
+    html+='<div style="padding:12px 14px;border-radius:8px;margin-bottom:12px;font-weight:700;background:rgba(255,61,82,.12);color:var(--red)">🔴 有 '+flags.length+' 处判不准,请你决定:</div>';
+    html+=flags.map(function(f){
+      return '<div style="padding:8px 10px;border:1px solid var(--border);border-left:3px solid var(--red);border-radius:6px;margin-bottom:8px;font-size:13px">'+f.msg+'</div>';
+    }).join('');
+  }
+  html+='<div style="font-size:12px;color:var(--text3);margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">'+
+    '本次开机以来:自动修复 <b style="color:var(--yellow)">'+(_monitorState.fixes||0)+'</b> 处;'+
+    '上次检查 '+(_monitorState.lastRun?new Date(_monitorState.lastRun).toLocaleTimeString('en-MY'):'—')+'。'+
+    '<br>每次自动修复都记在「操作日志」里(类型「监视修复」),可一键撤销。</div>';
+  body.innerHTML=html;
 }
 
 // ── Google Identity Services token client ──
@@ -2427,6 +2659,9 @@ function _restoreState(snapStr){
     } else if(Array.isArray(s)){
       entries = s;   // legacy entries-only snapshot
     }
+    // Entries restored (e.g. undo of a delete) are INTENDED to exist — clear their tombstones
+    // so the monitor doesn't re-remove them.
+    if(typeof _clearTombstones==='function') _clearTombstones((entries||[]).map(function(e){ return e._id; }));
   } catch(e){ console.warn('_restoreState failed:', e); }
 }
 function pushUndo(){
@@ -3006,10 +3241,7 @@ function renderAll(){
         <td class="num"><input class="alloc-input" type="text" inputmode="decimal" value="${entry.cash||''}" onfocus="allocFocus('${gi}','cash')" onblur="allocBlur('${gi}','cash')" oninput="updateAllocLive('${gi}','cash',this.value)" onchange="updateAlloc('${gi}','cash',this.value)"></td>
         <td style="font-size:11px;color:var(--text2)">${entry.owner||''}</td>
         <td><div class="row-btns">
-          <button class="qa-btn qa-act" onclick="quickAlloc('${gi}','act')" title="全给 ACT/BT HENG">${isRP?'BT':'ACT'}</button>
-          <button class="qa-btn qa-yes" onclick="quickAlloc('${gi}','yes')" title="全给 YES">YES</button>
-          <button class="qa-btn qa-hs" onclick="quickAlloc('${gi}','hs')" title="全给 HS">HS</button>
-          <button class="qa-btn qa-cash" onclick="quickAlloc('${gi}','cash')" title="全给 CASH">CSH</button>
+          ${_qaButtonsHTML(gi, group, false)}
           <button class="hide-btn" onclick="toggleHideEntry('${gi}')" title="${entry.hidden?'取消隐藏':'隐藏记录'}" style="${entry.hidden?'color:var(--accent)':''}">${entry.hidden?'🙈':'👁'}</button>
           <button class="edit-btn" onclick="openEditModal('${gi}')" title="Edit">✏️</button>
           <button class="del-btn" onclick="deleteEntry('${gi}')" title="Delete">×</button>
@@ -3039,14 +3271,7 @@ function renderAll(){
         var qaVisible = (_focusedEntryId === gi);
         var qaHtml = '';
         if(qaVisible){
-          var f1 = isRP ? 'btHeng' : 'act';
-          var l1 = isRP ? 'BT' : 'ACT';
-          qaHtml = '<span style="margin-left:10px;display:inline-flex;gap:3px">' +
-            '<button class="qa-btn qa-act" data-id="'+gi+'" data-f="'+f1+'" onclick="quickAlloc(this.dataset.id,this.dataset.f)" style="font-size:10px;padding:2px 5px">'+l1+'</button>' +
-            '<button class="qa-btn qa-yes" data-id="'+gi+'" data-f="yes" onclick="quickAlloc(this.dataset.id,this.dataset.f)" style="font-size:10px;padding:2px 5px">YES</button>' +
-            '<button class="qa-btn qa-hs" data-id="'+gi+'" data-f="hs" onclick="quickAlloc(this.dataset.id,this.dataset.f)" style="font-size:10px;padding:2px 5px">HS</button>' +
-            '<button class="qa-btn qa-cash" data-id="'+gi+'" data-f="cash" onclick="quickAlloc(this.dataset.id,this.dataset.f)" style="font-size:10px;padding:2px 5px">CSH</button>' +
-            '</span>';
+          qaHtml = '<span style="margin-left:10px;display:inline-flex;gap:3px">' + _qaButtonsHTML(gi, entry.group, true) + '</span>';
         }
         balTr.innerHTML = '<td></td>' +
           '<td colspan="3" style="padding:2px 10px 4px 20px;font-size:11px;color:var(--text3);font-style:italic;border-bottom:1px solid var(--border);background:var(--unalloc-bg)">' +
@@ -3246,8 +3471,7 @@ function updateDailySummary(){
   if(!dsDate) return;
 
   // Always show today's date as primary; chart name is shown separately if different
-  var n = new Date();
-  var todayStr = n.getDate()+'/'+(n.getMonth()+1)+'/'+n.getFullYear();
+  var todayStr = _todayDateStr();
   if(currentChartName && currentChartName.trim() !== todayStr){
     // Loaded a historical chart — show that chart's name with indicator
     dsDate.textContent = currentChartName + ' (历史)';
@@ -3433,13 +3657,50 @@ function quickAlloc(id, field){
   saveEntries(); renderAll();
 }
 
+// ACT quick-fill that takes the rounded-down value, toggling hundreds <-> tens on each click.
+// e.g. 13222 -> 1st click 13200 (floor to 100), 2nd click 13220 (floor to 10), 3rd click 13200 ...
+// Only sets ACT (leaves YES/HS/CASH alone — the remainder is filled manually).
+var _actRoundStep = {};  // entryId -> 0 (hundreds) | 1 (tens)
+function actRound(id){
+  var idx = entries.findIndex(function(x){ return x._id===id; });
+  if(idx<0) return;
+  var e = entries[idx];
+  if(e.group==='RP' || e.group==='THB') return;  // ACT rounding is for RM groups only
+  var base = e.rmAmount||0;
+  if(base<=0) return;
+  var step = _actRoundStep[id] || 0;
+  var val = (step===0) ? Math.floor(base/100)*100 : Math.floor(base/10)*10;
+  _actRoundStep[id] = (step===0) ? 1 : 0;  // toggle for next click
+  if(typeof _logOp==='function') _logOp('alloc', 'ACT进位：'+(e.name||'')+' → '+fmtN(val)+'（'+(step===0?'百位':'十位')+'）');
+  pushUndo();
+  e.act = val;
+  if(e.cdHidden) delete e.cdHidden;
+  saveEntries(); renderAll();
+}
+
+// Per-row quick-action buttons, group-aware. THB only needs HS; RP uses BT; RM uses ACT(进位).
+function _qaButtonsHTML(gi, group, small){
+  var st = small ? ' style="font-size:10px;padding:2px 5px"' : '';
+  function btn(cls, onclick, label, title){
+    return '<button class="qa-btn '+cls+'" onclick="'+onclick+'" title="'+title+'"'+st+'>'+label+'</button>';
+  }
+  var hs   = btn('qa-hs',   "quickAlloc('"+gi+"','hs')",   'HS',  '全给 HS');
+  var yes  = btn('qa-yes',  "quickAlloc('"+gi+"','yes')",  'YES', '全给 YES');
+  var cash = btn('qa-cash', "quickAlloc('"+gi+"','cash')", 'CSH', '全给 CASH');
+  if(group==='THB') return hs;                                   // THB 只用 HS
+  if(group==='RP')  return btn('qa-act', "quickAlloc('"+gi+"','act')", 'BT', '全给 BT HENG') + yes + hs + cash;
+  return btn('qa-act', "actRound('"+gi+"')", 'ACT', 'ACT 进位（点击切换 百位/十位）') + yes + hs + cash;
+}
+
 function deleteEntry(id){
   var idx = typeof id==='number' ? id : entries.findIndex(function(x){return x._id===id;});
   if(idx<0||!entries[idx]) return;
   if(!confirm(t('del_confirm')+': '+entries[idx].name)) return;
   if(typeof _logOp==='function') _logOp('delete', '删除客户：'+entries[idx].name, {snap: entries});
   pushUndo();
+  var _delId = entries[idx]._id;
   entries.splice(idx,1);
+  if(_delId) _addTombstones([_delId]);   // deletion sticks across devices
   saveEntries(); renderAll();
 }
 
@@ -4467,10 +4728,7 @@ function _cdDismiss(refs){
 
 // Build CD candidate list from historical charts (excluding today's chart).
 function _cdBuildItems(filterChartId){
-  var todayStr = (function(){
-    var n = new Date();
-    return n.getDate()+'/'+(n.getMonth()+1)+'/'+n.getFullYear();
-  })();
+  var todayStr = _todayDateStr();  // same format saved chart names use (consistent comparison)
   var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
   var consumed = _cdConsumedSet();
   var dismissed = _cdDismissedSet();
@@ -4509,10 +4767,7 @@ function _cdBuildItems(filterChartId){
 // The default C/D source = the most recent chart strictly before today
 // (i.e. the previous working day). Returns its chartId, or null if none.
 function _cdDefaultSourceId(){
-  var todayStr = (function(){
-    var n = new Date();
-    return n.getDate()+'/'+(n.getMonth()+1)+'/'+n.getFullYear();
-  })();
+  var todayStr = _todayDateStr();  // same format saved chart names use (consistent comparison)
   var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
   var best = null, bestTime = -1;
   charts.forEach(function(c){
@@ -4784,6 +5039,123 @@ function confirmCD(){
   }
 }
 
+// ── C/D reconciliation: compare each carried entry against its source's remaining ──
+function _fmtByGroup(group, currency, amt){
+  if(currency==='SGD') return 'SGD '+fmtN(amt);
+  if(group==='RP') return 'IDR '+(Number(amt)||0).toLocaleString();
+  if(group==='THB') return 'THB '+fmtN(amt);
+  return 'RM '+fmtN(amt);
+}
+// Locate a carried entry's source row in the saved charts (by chartId+_id, else _id, else sig).
+function _cdFindSource(cdSource){
+  if(!cdSource) return null;
+  var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
+  var hit = null;
+  // 1) exact chart + id
+  charts.forEach(function(c){
+    if(hit || !c || !Array.isArray(c.entries)) return;
+    if(cdSource.chartId && String(c.id)!==String(cdSource.chartId)) return;
+    c.entries.forEach(function(e){ if(!hit && e && cdSource.id && e._id===cdSource.id) hit={entry:e,chart:c}; });
+  });
+  // 2) id anywhere, then sig anywhere
+  if(!hit){
+    charts.forEach(function(c){
+      if(hit || !c || !Array.isArray(c.entries)) return;
+      c.entries.forEach(function(e){
+        if(hit || !e) return;
+        if(cdSource.id && e._id===cdSource.id) hit={entry:e,chart:c};
+        else if(cdSource.sig && _cdSig(e)===cdSource.sig) hit={entry:e,chart:c};
+      });
+    });
+  }
+  return hit;
+}
+function cdCompareReport(){
+  var body = document.getElementById('cd-compare-body');
+  if(!body) return;
+  var carried = entries.filter(function(e){ return e && e.cdSource; });
+  var rowsA = carried.map(function(e){
+    var isRP = e.group==='RP';
+    var thr = isRP ? 0.5 : 0.005;
+    var carriedAmt = e.amount||0;
+    var src = _cdFindSource(e.cdSource);
+    var status, srcRemStr='—', srcInfo='（找不到来源）';
+    if(!src){
+      status = '⚠️ 来源缺失';
+    } else {
+      var info = _cdComputeUnalloc(src.entry);
+      var srcRem = info ? info.remaining : 0;
+      srcRemStr = _fmtByGroup(e.group, e.currency, srcRem);
+      var srcDate=''; try { srcDate=new Date(src.chart.date).toLocaleDateString('en-MY'); } catch(_){}
+      srcInfo = (src.chart.name||srcDate||'');
+      status = (Math.abs(srcRem - carriedAmt) <= thr) ? '✅ 一致' : '⚠️ 金额不符';
+    }
+    return { name:_stripCDTag(e.name), bank:e.bank, srcInfo:srcInfo, srcRem:srcRemStr,
+             carried:_fmtByGroup(e.group, e.currency, carriedAmt), status:status };
+  });
+  var candidates = _cdBuildItems(null);  // unfinished, not consumed, not dismissed = 未带入
+
+  var okN  = rowsA.filter(function(r){ return r.status==='✅ 一致'; }).length;
+  var badN = rowsA.filter(function(r){ return r.status.indexOf('⚠️')===0; }).length;
+
+  var html = '';
+  // Summary banner
+  if(carried.length===0 && candidates.length===0){
+    html = '<div style="text-align:center;color:var(--text3);padding:24px">今日没有 C/D 带入记录,也没有待带入项。</div>';
+    body.innerHTML = html; document.getElementById('modal-cd-compare').classList.remove('hidden'); return;
+  }
+  var allGood = (badN===0);
+  html += '<div style="padding:10px 14px;border-radius:8px;margin-bottom:12px;font-weight:700;'+
+    (allGood?'background:rgba(0,212,144,.12);color:var(--green)':'background:rgba(255,140,42,.12);color:var(--orange)')+'">'+
+    (allGood ? '✅ 已带入 '+carried.length+' 条,金额全部一致' : '⚠️ 发现 '+badN+' 条异常,请核对(下方橙色行)')+
+    '</div>';
+
+  // Section A: carried items
+  if(rowsA.length){
+    html += '<div style="font-size:12px;font-weight:700;color:var(--text2);margin:8px 0 6px">📥 今日已带入('+rowsA.length+'）</div>';
+    html += '<table style="width:100%;border-collapse:collapse;font-size:12px;margin-bottom:14px">'+
+      '<thead><tr style="background:var(--surface2)">'+
+      '<th style="padding:6px 8px;text-align:left;border-bottom:1.5px solid var(--border2)">客户</th>'+
+      '<th style="padding:6px 8px;text-align:left;border-bottom:1.5px solid var(--border2)">来源</th>'+
+      '<th style="padding:6px 8px;text-align:right;border-bottom:1.5px solid var(--border2)">来源余额</th>'+
+      '<th style="padding:6px 8px;text-align:right;border-bottom:1.5px solid var(--border2)">带入金额</th>'+
+      '<th style="padding:6px 8px;text-align:left;border-bottom:1.5px solid var(--border2)">状态</th></tr></thead><tbody>'+
+      rowsA.map(function(r){
+        var warn = r.status.indexOf('⚠️')===0;
+        return '<tr style="border-bottom:1px solid var(--border);'+(warn?'background:rgba(255,140,42,.10)':'')+'">'+
+          '<td style="padding:5px 8px;font-weight:600">'+r.name+'</td>'+
+          '<td style="padding:5px 8px;color:var(--text3);font-size:10px">'+r.srcInfo+'</td>'+
+          '<td style="padding:5px 8px;text-align:right;font-family:monospace">'+r.srcRem+'</td>'+
+          '<td style="padding:5px 8px;text-align:right;font-family:monospace">'+r.carried+'</td>'+
+          '<td style="padding:5px 8px;white-space:nowrap;font-weight:700;'+(warn?'color:var(--orange)':'color:var(--green)')+'">'+r.status+'</td>'+
+          '</tr>';
+      }).join('')+'</tbody></table>';
+  }
+
+  // Section B: not-yet-carried (informational)
+  html += '<div style="font-size:12px;font-weight:700;color:var(--text2);margin:8px 0 6px">⏳ 尚未带入('+candidates.length+'）<span style="font-weight:400;color:var(--text3)">— 来源里还没带入今日的未完成项(可能是有意未带,也可能遗漏)</span></div>';
+  if(candidates.length){
+    html += '<table style="width:100%;border-collapse:collapse;font-size:12px">'+
+      '<thead><tr style="background:var(--surface2)">'+
+      '<th style="padding:6px 8px;text-align:left;border-bottom:1.5px solid var(--border2)">客户</th>'+
+      '<th style="padding:6px 8px;text-align:left;border-bottom:1.5px solid var(--border2)">来源</th>'+
+      '<th style="padding:6px 8px;text-align:right;border-bottom:1.5px solid var(--border2)">余额</th></tr></thead><tbody>'+
+      candidates.map(function(it){
+        var dd=''; try{ dd=new Date(it.chartDate).toLocaleDateString('en-MY'); }catch(_){}
+        return '<tr style="border-bottom:1px solid var(--border)">'+
+          '<td style="padding:5px 8px">'+(it.entry.name||'')+'</td>'+
+          '<td style="padding:5px 8px;color:var(--text3);font-size:10px">'+(it.chartName||dd)+'</td>'+
+          '<td style="padding:5px 8px;text-align:right;font-family:monospace">'+_fmtByGroup(it.entry.group, it.entry.currency, it.info.remaining)+'</td>'+
+          '</tr>';
+      }).join('')+'</tbody></table>';
+  } else {
+    html += '<div style="color:var(--text3);font-size:12px;padding:6px 0">（没有待带入项）</div>';
+  }
+
+  body.innerHTML = html;
+  document.getElementById('modal-cd-compare').classList.remove('hidden');
+}
+
 
 function _doSaveChart(name, overwriteId){
   var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
@@ -4989,6 +5361,7 @@ function loadChart(id){
   if(typeof _logOp==='function') _logOp('load', '载入图表「'+c.name+'」（替换当前 '+entries.length+' 条）', {snap: entries});
   _manualChartLoadAt = Date.now();
   pushUndo(); entries=JSON.parse(JSON.stringify(c.entries));
+  if(typeof _clearTombstones==='function') _clearTombstones(entries.map(function(e){ return e._id; }));  // explicitly loaded = intended
   // User manually loaded — mark this chart's date as active (prevents auto-rotation)
   if(c.date){
     localStorage.setItem('mg_last_active_chart_date', new Date(c.date).toISOString().slice(0,10));
@@ -5014,7 +5387,9 @@ function deleteChart(id){
 function confirmClear(){
   if(!confirm(t('clear_confirm'))) return;
   if(typeof _logOp==='function') _logOp('clear', '清空今日表格（'+entries.length+' 条）', {snap: entries});
-  pushUndo(); entries=[]; saveEntries(); renderAll();
+  pushUndo();
+  _addTombstones(entries.map(function(e){ return e._id; }));  // cleared rows stay cleared across devices
+  entries=[]; saveEntries(); renderAll();
   // CRITICAL: reset chart link — cleared table means starting a new chart
   // Prevents accidentally overwriting yesterday's saved chart on next Save
   currentChartId = null;
@@ -5213,10 +5588,7 @@ function _applyMasterListSyncToEntries(diffs){
 
   // KRIT-2: Refuse to sync if user has loaded a historical chart (not today's)
   // This prevents Master List edits from contaminating yesterday's records
-  var todayName = (function(){
-    var n = new Date();
-    return n.getDate()+'/'+(n.getMonth()+1)+'/'+n.getFullYear();
-  })();
+  var todayName = _todayDateStr();
   var isHistoricalView = currentChartName && currentChartName.trim() !== todayName;
   if(isHistoricalView){
     var msg = '⚠️ 当前加载的是历史记录「' + currentChartName + '」（不是今日表格）。\n\n' +
@@ -5501,20 +5873,17 @@ function _personLabel(person){ return person==='BT HENG' ? 'BT' : person; }
 //   • THB group  -> "AMT: THB <full>", "THB TOTAL: THB ..."
 //   • Each group TOTAL is preceded by a blank line (never glued to the last customer).
 //   • Bottom "GRAND TOTAL <PAYER> (RM)" only when an RM-group section is present and not batch.
+// Per-payer export text. `batch` only restricts WHICH entries are exported (the caller
+// swaps `entries` to the selected subset) — it does NOT change the amount shown: a payer
+// export (CASH/ACT/…) always shows that payer's ALLOCATION, never the full row amount.
 function buildPersonText(person, ds, section, batch){
   section = section || 'all';
   var field = person==='BT HENG' ? 'btHeng' : person.toLowerCase();
   var label = _personLabel(person);
-  var lines = [ds + ' CONTRA (' + person + ')'];
+  var lines = [ds + ' CONTRA (' + person + ')' + (batch ? ' [选中]' : '')];
   var rmGrand = 0;
   var hasRMsection = false;
 
-  function fullAmtStr(e){
-    if(e.currency==='SGD') return 'SGD '+fmtN(e.amount);
-    if(e.group==='RP') return e.currency==='IDR' ? 'IDR '+(Number(e.amount)||0).toLocaleString() : 'SGD '+fmtN(e.amount);
-    if(e.group==='THB') return 'THB '+fmtN(e.amount||0);
-    return 'RM '+fmtN(e.rmAmount||0);
-  }
   function pushHead(e, idx){
     if(idx > 0) lines.push('');
     lines.push((idx+1)+'. '+e.name);
@@ -5526,9 +5895,10 @@ function buildPersonText(person, ds, section, batch){
     if(section==='rp' && !isRP) return;
     if(section==='rm' && isRP) return;
 
+    // Only rows that actually have an allocation to this payer.
     var ge = entries.filter(function(e){
       if(e.group!==grp || e.hidden) return false;
-      return batch ? true : ((e[field]||0) > 0);
+      return (e[field]||0) > 0;
     });
 
     if(isRP){
@@ -5555,10 +5925,8 @@ function buildPersonText(person, ds, section, batch){
       pushHead(e, i);
       if(isTHB){
         lines.push('AMT: THB '+fmtN(e.amount||0));
-      } else if(batch){
-        lines.push('AMT: '+fullAmtStr(e));
       } else {
-        lines.push(label+': RM '+fmtN(e[field]||0));
+        lines.push(label+': RM '+fmtN(e[field]||0));   // ← the payer's allocation, e.g. CASH 500
         rmGrand += e[field]||0;
         hasRMsection = true;
       }
@@ -5568,18 +5936,14 @@ function buildPersonText(person, ds, section, batch){
     if(isTHB){
       var thbTot = ge.reduce(function(s,e){ return s+(e.amount||0); },0);
       lines.push(grp+' TOTAL: THB '+fmtN(thbTot));
-    } else if(batch){
-      var rmTot = ge.reduce(function(s,e){ return s+(e.rmAmount||0); },0);
-      lines.push(grp+' TOTAL: RM '+fmtN(rmTot));
     } else {
       var fTot = ge.reduce(function(s,e){ return s+(e[field]||0); },0);
       lines.push(grp+' TOTAL: RM '+fmtN(fTot));
     }
   });
 
-  // RM grand total — only for non-batch exports that include at least one RM-group section.
-  // RP-only / THB-only exports omit it (their amounts aren't RM).
-  if(!batch && hasRMsection){
+  // RM grand total of this payer's allocations (RP-/THB-only exports omit it).
+  if(hasRMsection){
     lines.push('');
     lines.push('——————————————');
     lines.push('GRAND TOTAL '+label+' (RM): RM '+fmtN(rmGrand));
@@ -5609,6 +5973,9 @@ function downloadExportImg(){
   })();
   const field=person==='BT HENG'?'btHeng':person==='YES'?'yes':person.toLowerCase();
   const isYES=person==='YES';
+  // fullMode = the GENERIC "export selected rows" image (the batch 图片 button, person='BATCH').
+  // A payer image (CASH/ACT/…) — even from batch — must show that payer's ALLOCATION, not the full amount.
+  const fullMode = (person === 'BATCH' || !person);
 
   // If in batch mode, swap entries to cache for the duration of the export
   var _origForBatch = null;
@@ -5623,8 +5990,8 @@ function downloadExportImg(){
   const todayDs = `${now.getDate()}/${now.getMonth()+1}/${now.getFullYear()}`;
   // Use chart's name (which is its date) if available, so historical exports show correct date
   const ds = (typeof currentChartName === 'string' && currentChartName.trim()) ? currentChartName.trim() : todayDs;
-  // In batch mode the amount column shows each entry's FULL amount, so label it AMT.
-  const amtColHead = (isYES||isBatch) ? 'AMT' : person;
+  // Generic batch image shows the full amount (label AMT); payer images label by payer.
+  const amtColHead = (isYES||fullMode) ? 'AMT' : person;
   const COLS=['No','Name','Bank','A/C No',amtColHead];
   const rows=[];
 
@@ -5640,16 +6007,16 @@ function downloadExportImg(){
     // Normal mode: only entries with positive value in the selected field
     const ge=entries.filter(function(e){
       if(e.group!==grp || e.hidden) return false;
-      if(isBatch) return true;  // batch — include all selected
-      return (e[field]||0) > 0;
+      if(fullMode) return true;          // generic batch — include all selected rows
+      return (e[field]||0) > 0;          // payer export — only rows allocated to this payer
     });
     if(!ge.length) return;
     rows.push({type:'grp',label:grp,color:BANK_COLORS[grp]||'#888'});
     ge.forEach((e,i)=>{
       var safeIDR = (Number(e.amount)||0).toLocaleString();
       var amt;
-      if(isBatch){
-        // Batch mode: show full entry amount in its currency
+      if(fullMode){
+        // Generic batch: show full entry amount in its currency
         if(e.currency === 'SGD'){
           amt = 'SGD ' + fmtN(e.amount);
         } else if(isRP){
@@ -5668,8 +6035,8 @@ function downloadExportImg(){
       }
       rows.push({type:'row',no:i+1,name:e.name,bank:e.bank,acct:fmtAcct(e.account),amt,isCD:e.isCD});
     });
-    // Batch totals must match the displayed FULL amounts (sum rmAmount), not the payer field.
-    const gt = isBatch ? ge.reduce((s,e)=>s+(e.rmAmount||0),0) : ge.reduce((s,e)=>s+(e[field]||0),0);
+    // Totals match the displayed amounts: generic batch sums full rmAmount; payer sums the field.
+    const gt = fullMode ? ge.reduce((s,e)=>s+(e.rmAmount||0),0) : ge.reduce((s,e)=>s+(e[field]||0),0);
     var totVal;
     if(isRP){
       var rpIDRtot2=ge.filter(e=>e.currency==='IDR').reduce((s,e)=>s+(e.amount||0),0);
@@ -6739,23 +7106,37 @@ function _checkDailyChartRotation(){
     return;
   }
 
-  // If lastActiveDate is today but no chart loaded, look up today's chart and load it
+  // Same-day refresh: lastActiveDate is today but the chart link was lost on reload
+  // (currentChartId is a JS var that resets to null). Re-attach the chart link, but
+  // DO NOT overwrite the live `mg_entries` — it is the authoritative current state
+  // (persisted on every edit/delete). Overwriting it with the chart's last-saved
+  // snapshot would resurrect just-deleted/edited records after a refresh.
   if(!currentChartId && lastActiveDate === todayKey){
     var existingCharts2 = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
     var todayCh = existingCharts2.find(function(c){ return c.name && c.name.trim() === todayName; });
     if(todayCh){
-      entries = JSON.parse(JSON.stringify(todayCh.entries||[]));
       currentChartId = todayCh.id;
       currentChartName = todayCh.name.trim();
-      safeSetItem(ENTRIES_KEY, JSON.stringify(entries));
-      // Load chart's rates too (if today's chart has them)
-      if(todayCh.rates && (todayCh.rates.sgd || todayCh.rates.sgdThb || todayCh.rates.sgdIdr)){
+      if(!entries || entries.length === 0){
+        // Live entries empty — safe to adopt the chart's entries (recovery).
+        entries = JSON.parse(JSON.stringify(todayCh.entries||[]));
+        safeSetItem(ENTRIES_KEY, JSON.stringify(entries));
+        if(typeof markSaved === 'function') markSaved();
+      } else {
+        // Keep live entries. If they differ from the saved chart, it's unsaved work
+        // (e.g. a delete not yet committed to the chart) — flag it so a Save updates the chart.
+        var _liveMatches = (JSON.stringify(entries) === JSON.stringify(todayCh.entries||[]));
+        if(_liveMatches){ if(typeof markSaved === 'function') markSaved(); }
+        else { if(typeof markUnsaved === 'function') markUnsaved(); }
+      }
+      // Only adopt chart rates if local rates are empty (never clobber live rate edits).
+      var _noLiveRates = !rates || (!rates.sgd && !rates.thb && !rates.idr);
+      if(_noLiveRates && todayCh.rates && (todayCh.rates.sgd || todayCh.rates.sgdThb || todayCh.rates.sgdIdr)){
         rates = (typeof _backfillRawRates === 'function') ? _backfillRawRates({...todayCh.rates}) : {...todayCh.rates};
         if(typeof populateRateInputs === 'function') populateRateInputs();
       }
-      if(typeof markSaved === 'function') markSaved();
       if(typeof renderAll === 'function') renderAll();
-      console.log('Rotation: loaded today chart "' + todayName + '" from history');
+      console.log('Rotation: re-attached today chart "' + todayName + '" (kept live entries)');
       return;
     }
     // No today chart found — fall through to step 2 to create one
@@ -7864,6 +8245,7 @@ function restoreSnapshot(i){
   if(!confirm('恢复到 '+new Date(s.ts).toLocaleString('en-MY')+' 的快照？当前数据将被替换。')) return;
   pushUndo();
   entries = s.entries;
+  if(typeof _clearTombstones==='function') _clearTombstones(entries.map(function(e){ return e._id; }));
   if(s.rates){ rates = _backfillRawRates(s.rates); }
   saveEntries();
   closeModal('modal-recovery');
@@ -7880,7 +8262,7 @@ function openOpLog(){
 var _OPLOG_LABELS = {
   add:'➕ 添加', edit:'✏️ 编辑', delete:'🗑 删除', batch_delete:'🗑 批量删除',
   clear:'🧹 清空', cd_import:'📥 C/D 带入', load:'📂 载入图表', import:'📊 Excel 导入',
-  sync_apply:'☁️ 云端同步覆盖', restore:'⮌ 恢复', save:'💾 保存', autosave:'💾 自动保存', alloc:'✏️ 分配'
+  sync_apply:'☁️ 云端同步覆盖', restore:'⮌ 恢复', save:'💾 保存', autosave:'💾 自动保存', alloc:'✏️ 分配', monitor_fix:'🛡 监视修复'
 };
 function renderOpLog(){
   var el = document.getElementById('oplog-list'); if(!el) return;
@@ -7915,6 +8297,7 @@ function restoreFromOplog(i){
   if(typeof _logOp==='function') _logOp('restore', '从日志恢复到「'+(rec.msg||'')+'」之前', {snap: entries});
   pushUndo();
   entries = JSON.parse(JSON.stringify(rec.snap));
+  if(typeof _clearTombstones==='function') _clearTombstones(entries.map(function(e){ return e._id; }));
   saveEntries();
   renderAll();
   closeModal('modal-oplog');
@@ -8105,14 +8488,7 @@ function updateBalRow(id){
   var qaVisible = (_focusedEntryId === id);
   var qaHtml = '';
   if(qaVisible){
-    var f1 = isRP ? 'btHeng' : 'act';
-    var l1 = isRP ? 'BT' : 'ACT';
-    qaHtml = '<span style="margin-left:10px;display:inline-flex;gap:3px">' +
-      '<button class="qa-btn qa-act" data-id="'+id+'" data-f="'+f1+'" onclick="quickAlloc(this.dataset.id,this.dataset.f)" style="font-size:10px;padding:2px 5px">'+l1+'</button>' +
-      '<button class="qa-btn qa-yes" data-id="'+id+'" data-f="yes" onclick="quickAlloc(this.dataset.id,this.dataset.f)" style="font-size:10px;padding:2px 5px">YES</button>' +
-      '<button class="qa-btn qa-hs" data-id="'+id+'" data-f="hs" onclick="quickAlloc(this.dataset.id,this.dataset.f)" style="font-size:10px;padding:2px 5px">HS</button>' +
-      '<button class="qa-btn qa-cash" data-id="'+id+'" data-f="cash" onclick="quickAlloc(this.dataset.id,this.dataset.f)" style="font-size:10px;padding:2px 5px">CSH</button>' +
-      '</span>';
+    qaHtml = '<span style="margin-left:10px;display:inline-flex;gap:3px">' + _qaButtonsHTML(id, (e&&e.group)||'', true) + '</span>';
   }
 
   var innerHtml = '<td></td>' +
@@ -8312,7 +8688,9 @@ function batchDelete(){
   if(!confirm((isEng?'Delete '+_batchSelected.size+' entries?':'删除 '+_batchSelected.size+' 条记录？'))) return;
   if(typeof _logOp==='function') _logOp('batch_delete', '批量删除 '+_batchSelected.size+' 条', {snap: entries});
   pushUndo();
+  var _delIds = Array.from(_batchSelected);
   entries = entries.filter(function(e){ return !_batchSelected.has(e._id); });
+  _addTombstones(_delIds);   // deletions stick across devices
   _batchSelected.clear();
   document.getElementById('batch-bar').classList.add('hidden');
   saveEntries(); renderAll();
@@ -8754,6 +9132,7 @@ function init(){
     if(typeof _migrateLocalGroups === 'function') _migrateLocalGroups();
     if(typeof _startPeriodicSync === 'function') _startPeriodicSync();  // background ~20s auto-sync
     if(typeof updateCDBadge === 'function') updateCDBadge();  // refresh badge after rotation/sync
+    if(typeof _startMonitor === 'function'){ _startMonitor(); _monitorScan('init'); }  // supervisory monitor
   }, 2000);
   // Background sync: a ~20s periodic pull (see _startPeriodicSync) keeps devices in
   // sync automatically, with guards that never overwrite active edits or a loaded
