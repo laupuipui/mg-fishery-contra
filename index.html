@@ -588,6 +588,14 @@ body.fs-lg .alloc-input{font-size:14px}
     border:1px solid rgba(0,212,144,.3);transition:all .3s;white-space:nowrap;
   ">🛡 正常</button>
 
+  <!-- Operator-facing plain safety light (driven by the independent MGAudit auditor) -->
+  <button id="audit-light" onclick="MGAuditOpen&&MGAuditOpen()" title="数据安全检查" style="
+    font-family:'IBM Plex Sans',sans-serif;font-size:13px;font-weight:700;
+    padding:6px 12px;border-radius:6px;flex-shrink:0;cursor:pointer;
+    background:rgba(0,212,144,.14);color:var(--green);
+    border:1.5px solid rgba(0,212,144,.45);transition:all .3s;white-space:nowrap;
+  ">✓ 数据正常</button>
+
   <!-- Left: core daily actions -->
   <div id="topbar-left">
     <button class="tb-btn yellow" onclick="toggleRates()" data-i="btn_rates">💱 汇率</button>
@@ -1464,12 +1472,16 @@ function _mergeChartPair(a, b){
   var aNewer = (new Date(a.date||0).getTime()) >= (new Date(b.date||0).getTime());
   var primary = aNewer ? a : b;        // metadata + conflict winner
   var secondary = aNewer ? b : a;
+  // Tombstones express "deleted from TODAY's working set" — apply them ONLY to the
+  // chart named for today. Historical charts are immutable records (and CD sources);
+  // a deletion today must never strip a same-_id row out of yesterday's chart.
+  var _isTodayChart = (function(){ try { return (primary.name||'').trim() === _todayDateStr(); } catch(_){ return false; } })();
   var byKey = {}, order = [];
   function add(list, isPrimary){
     (list||[]).forEach(function(e){
       if(!e) return;
-      // Tombstoned → drop, UNLESS this copy was edited after the deletion (edit wins).
-      if(e._id && tomb[e._id] && !(e.updatedAt && e.updatedAt > tomb[e._id])) return;
+      // Tombstoned → drop (today only), UNLESS edited after the deletion (edit wins).
+      if(_isTodayChart && e._id && tomb[e._id] && !(e.updatedAt && e.updatedAt > tomb[e._id])) return;
       var k=_entryKey(e);
       if(!(k in byKey)){ byKey[k]=e; order.push(k); }
       else if(isPrimary){ byKey[k]=e; }
@@ -1996,6 +2008,10 @@ function _monitorScan(reason){
   _monitorState.lastRun = Date.now();
 
   var tomb = _getTombstones();
+  // Tombstone removal applies only while working on TODAY. When reviewing a historical
+  // chart, don't delete its rows out from under the user (and loadChart already cleared
+  // their tombstones — this is a double safeguard).
+  var _monOnToday = (function(){ try { return !currentChartName || (currentChartName||'').trim()===_todayDateStr(); } catch(_){ return true; } })();
   var before = null;            // lazy: only snapshot if we actually change something
   var fixed = [];               // human descriptions
   var flags = [];               // {key,msg} needing user decision
@@ -2008,7 +2024,7 @@ function _monitorScan(reason){
     var e = entries[i];
     if(!e) { ensureSnap(); continue; }   // drop null holes
     // (1) tombstone enforcement — a deleted id reappeared (sync resurrection)
-    if(e._id && tomb[e._id]){
+    if(_monOnToday && e._id && tomb[e._id]){
       // If this copy was edited AFTER the deletion, the edit wins: keep it, clear the tombstone.
       if(e.updatedAt && e.updatedAt > tomb[e._id]){
         if(typeof _clearTombstones==='function') _clearTombstones([e._id]);
@@ -2764,7 +2780,8 @@ function _compactEntry(e){
   return { _id:e._id, name:e.name, bank:e.bank, account:e.account, group:e.group, owner:e.owner,
            currency:e.currency, amount:e.amount, rmAmount:e.rmAmount,
            act:e.act, yes:e.yes, hs:e.hs, cash:e.cash, btHeng:e.btHeng,
-           isCD:e.isCD, hidden:e.hidden, sgdPending:e.sgdPending, sgdAmount:e.sgdAmount, cdSource:e.cdSource };
+           isCD:e.isCD, hidden:e.hidden, sgdPending:e.sgdPending, sgdAmount:e.sgdAmount, cdSource:e.cdSource,
+           conv:e.conv, amountUserEdited:e.amountUserEdited, updatedAt:e.updatedAt };
 }
 // type: short code; msg: human text; opts.snap = entries array BEFORE the op (for restore).
 function _logOp(type, msg, opts){
@@ -2853,25 +2870,21 @@ function _saveRatesToTodayChart(){
   try {
     var todayName = _todayDateStr();
     var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
-    var idx = -1;
-    if(currentChartId != null) idx = charts.findIndex(function(c){ return String(c.id)===String(currentChartId); });
-    if(idx < 0) idx = charts.findIndex(function(c){ return c.name && c.name.trim()===todayName; });
+    // Bind ONLY to the chart literally named for today. Never use currentChartId
+    // (that points at whatever chart is being viewed — could be a historical one),
+    // and never fabricate a chart from the current `entries` (which, while viewing
+    // history, would write yesterday's rows into a today-named chart → today gets
+    // overwritten by yesterday). If today's chart doesn't exist yet, do nothing —
+    // the rate stays in global mg_rates and is captured at the next real save/rotation.
+    var idx = charts.findIndex(function(c){ return c.name && c.name.trim()===todayName; });
+    if(idx < 0) return;
     var rsnap = {sgd:rates.sgd, thb:rates.thb, idr:rates.idr, sgdThb:rates.sgdThb, sgdIdr:rates.sgdIdr};
     var allEmpty = !(rsnap.sgd||rsnap.thb||rsnap.idr||rsnap.sgdThb||rsnap.sgdIdr);
-    if(idx >= 0){
-      var ex = charts[idx].rates;
-      var exHas = ex && (ex.sgd||ex.thb||ex.idr||ex.sgdThb||ex.sgdIdr);
-      if(allEmpty && exHas) return;             // don't wipe good rates with empty
-      charts[idx].rates = rsnap;
-      safeSetItem(CHARTS_KEY, JSON.stringify(charts));
-    } else if(!allEmpty){
-      // No today chart yet — create one so the rate binds to today immediately.
-      var nc = { id:(currentChartId!=null?currentChartId:Date.now()), name:todayName, date:new Date().toISOString(), entries:JSON.parse(JSON.stringify(entries||[])), rates:rsnap };
-      charts.unshift(nc);
-      if(charts.length>365) charts.pop();
-      currentChartId = nc.id; currentChartName = todayName;
-      safeSetItem(CHARTS_KEY, JSON.stringify(charts));
-    }
+    var ex = charts[idx].rates;
+    var exHas = ex && (ex.sgd||ex.thb||ex.idr||ex.sgdThb||ex.sgdIdr);
+    if(allEmpty && exHas) return;             // don't wipe good rates with empty
+    charts[idx].rates = rsnap;                 // rates only — never touch .entries
+    safeSetItem(CHARTS_KEY, JSON.stringify(charts));
   } catch(e){ console.warn('_saveRatesToTodayChart failed:', e); }
 }
 
@@ -3002,11 +3015,15 @@ function checkPendingConversions(thbReady, idrReady, sgdRMReady){
 
   _showConversionToast(pending.length, lines, function(){
     pushUndo();
+    var _n = 0;
     pending.forEach(function(e){
       var targetCur = targetFor(e);
       var sgdAmt = e.sgdAmount || e.amount;
       var converted = convertCur(sgdAmt, 'SGD', targetCur);
       if(converted <= 0) return;
+      // Record conversion provenance so the independent auditor can verify the math
+      // later. `mult` is the exact rate used; `thb` is kept for THB's rmAmount check.
+      var mult = targetCur==='THB' ? rates.sgdThb : (targetCur==='IDR' ? rates.sgdIdr : rates.sgd);
       if(targetCur === 'RM'){
         e.amount   = parseFloat(converted.toFixed(2));
         e.currency = 'RM';
@@ -3020,12 +3037,17 @@ function checkPendingConversions(thbReady, idrReady, sgdRMReady){
         e.currency = 'THB';
         e.rmAmount = (rates.thb||0)>0 ? parseFloat((e.amount*rates.thb).toFixed(2)) : 0;
       }
+      e.conv = { sgd: sgdAmt, mult: mult, target: targetCur, thb: (targetCur==='THB' ? (rates.thb||0) : undefined), at: Date.now() };
+      e.amountUserEdited = false;   // freshly auto-converted → auditor checks the math
+      e.updatedAt = Date.now();
       e.sgdPending = false;
       e.userKeepsSGD = false;
-      delete e.sgdAmount;
+      // keep e.sgdAmount as the source of truth for the auditor
+      _n++;
     });
     saveEntries();
     renderAll();
+    return _n;   // tells the toast how many were converted (for the "done" confirmation)
   });
 }
 
@@ -3058,39 +3080,47 @@ function _showConversionToast(count, lines, onConfirm){
   var old = document.getElementById('conv-toast');
   if(old) old.remove();
 
+  // Tablet-sized card, centered. Does NOT auto-dismiss — stays until the operator
+  // taps 立即换算 or 暂不, so it can never disappear before they act.
   var toast = document.createElement('div');
   toast.id = 'conv-toast';
   toast.style.cssText = [
-    'position:fixed','bottom:24px','left:50%','transform:translateX(-50%)',
-    'background:var(--surface)','border:2px solid var(--yellow)',
-    'border-radius:12px','padding:16px 20px','z-index:9999',
-    'box-shadow:0 8px 32px rgba(0,0,0,.6)','max-width:92vw','width:420px',
+    'position:fixed','top:50%','left:50%','transform:translate(-50%,-50%)',
+    'background:var(--surface)','border:3px solid var(--yellow)',
+    'border-radius:16px','padding:22px 24px','z-index:10001',
+    'box-shadow:0 12px 48px rgba(0,0,0,.65)','max-width:94vw','width:520px',
     'font-family:IBM Plex Sans,sans-serif'
   ].join(';');
 
-  var preview = lines.slice(0,4).map(function(l){
-    return '<div style="font-size:11px;color:var(--text2);margin-top:3px;font-family:IBM Plex Mono,monospace">'+l+'</div>';
+  var preview = lines.slice(0,8).map(function(l){
+    return '<div style="font-size:15px;color:var(--text);margin-top:6px;font-family:IBM Plex Mono,monospace">'+l+'</div>';
   }).join('');
-  if(lines.length > 4) preview += '<div style="font-size:11px;color:var(--text3);margin-top:3px">...还有 '+(lines.length-4)+' 条</div>';
+  if(lines.length > 8) preview += '<div style="font-size:14px;color:var(--text3);margin-top:6px">…还有 '+(lines.length-8)+' 条</div>';
 
   toast.innerHTML =
-    '<div style="font-size:13px;font-weight:700;color:var(--yellow)">💱 发现 '+count+' 条 SGD 待换算记录</div>'+
-    preview+
-    '<div style="display:flex;gap:10px;margin-top:14px">'+
+    '<div style="font-size:19px;font-weight:700;color:var(--yellow);margin-bottom:6px">💱 有 '+count+' 笔新币(SGD)要换算</div>'+
+    '<div style="font-size:13px;color:var(--text3);margin-bottom:8px">请核对下面的换算，没问题就按「立即换算」：</div>'+
+    '<div style="max-height:46vh;overflow:auto">'+preview+'</div>'+
+    '<div style="display:flex;gap:14px;margin-top:20px">'+
       '<button onclick="_dismissConvToast()" '+
-        'style="flex:1;padding:9px;border-radius:7px;border:1px solid var(--border2);background:var(--surface2);color:var(--text2);font-size:13px;cursor:pointer">暂不</button>'+
+        'style="flex:1;min-height:56px;border-radius:12px;border:2px solid var(--border2);background:var(--surface2);color:var(--text2);font-size:17px;font-weight:600;cursor:pointer">暂不</button>'+
       '<button id="conv-toast-confirm" '+
-        'style="flex:2;padding:9px;border-radius:7px;border:none;background:var(--yellow);color:#000;font-size:13px;font-weight:700;cursor:pointer">✅ 立即换算</button>'+
+        'style="flex:2;min-height:56px;border-radius:12px;border:none;background:var(--yellow);color:#000;font-size:18px;font-weight:700;cursor:pointer">✅ 立即换算</button>'+
     '</div>';
 
   document.body.appendChild(toast);
   document.getElementById('conv-toast-confirm').addEventListener('click', function(){
-    toast.remove();
-    onConfirm();
+    var n = 0;
+    try { n = onConfirm() || 0; } catch(err){ console.warn('convert failed:', err); }
+    // Confirm the system actually executed before the card goes away.
+    toast.innerHTML =
+      '<div style="font-size:20px;font-weight:700;color:var(--green);text-align:center;padding:10px 0">✅ 已换算 '+n+' 笔</div>'+
+      '<div style="display:flex;margin-top:14px">'+
+        '<button onclick="_dismissConvToast()" style="flex:1;min-height:56px;border-radius:12px;border:none;background:var(--green);color:#fff;font-size:18px;font-weight:700;cursor:pointer">知道了</button>'+
+      '</div>';
+    toast.style.borderColor = 'var(--green)';
   });
-
-  // Auto-dismiss after 30 seconds if no action
-  setTimeout(function(){ if(toast.parentNode) toast.remove(); }, 30000);
+  // NO auto-dismiss timer — must be dismissed by an explicit tap.
 }
 
 // ======================================================
@@ -3833,6 +3863,9 @@ function confirmEdit(idx){
   const cur=modalState.editCur||entries[idx].currency;
   if(typeof _logOp==='function') _logOp('edit', '编辑客户：'+(entries[idx]?entries[idx].name:''), {snap: entries});
   pushUndo();
+  // Operator manually edited the amount → exempt from the auditor's conversion-math
+  // check (e.g. rounding SGD→RM 2223.33 to 2223.3 / 2223.4 is intentional).
+  if(amt !== entries[idx].amount) entries[idx].amountUserEdited = true;
   entries[idx].amount=amt;
   entries[idx].currency=cur;
   entries[idx].owner=owner;
@@ -3926,6 +3959,7 @@ function renderModalStep(){
         <div class="chip" onclick="selCur('IDR',this)">IDR</div>
         <div class="chip" onclick="selCur('THB',this)">THB</div>
       </div>
+      <div id="sgd-hint" style="display:none;margin-top:8px;padding:8px 10px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.4);border-radius:7px;font-size:12px;color:var(--text2);line-height:1.5">💡 印尼盾/泰铢顾客早上请用<b style="color:#f59e0b">新币 (SGD)</b>输入金额，下午有汇率后系统会提示换算。</div>
       <div id="conv-prev" style="display:none;background:var(--surface2);border-radius:6px;padding:10px;margin-top:10px;font-family:'IBM Plex Mono',monospace;font-size:12px;color:var(--text2)"></div>
       <div id="conv-toggle-row" style="display:none;margin-top:12px;align-items:center;gap:10px;flex-wrap:wrap">
         <span style="font-size:12px;color:var(--text2)">${isEng?'Convert to:':'换算为：'}</span>
@@ -3945,12 +3979,14 @@ function renderModalStep(){
         <button class="btn-secondary" onclick="modalState.step='search';renderModalStep()">${t('back')}</button>
         <button class="btn-primary" onclick="confirmAmt()">${t('next')}</button>
       </div>`;
-    // Set default currency based on customer's group
+    // Set default currency based on customer's group.
+    // THB/RP customers report a SGD amount in the morning (their THB/IDR rate is only
+    // known in the afternoon), so default those to SGD to avoid wrong-currency entry.
     var defCur = 'RM';
+    var _cgIsForeign = false;
     if(modalState.customer){
       var cg = modalState.customer.group || _bankToGroupSafe(modalState.customer.bank, modalState.forceGroup);
-      if(cg==='THB') defCur='THB';
-      else if(cg==='RP') defCur='IDR';
+      if(cg==='THB' || cg==='RP'){ defCur='SGD'; _cgIsForeign = true; }
     }
     modalState.currency = defCur;
     // Pre-select the correct chip
@@ -3962,6 +3998,9 @@ function renderModalStep(){
       // Show conv-toggle-row always (user may want to convert)
       var ctr = document.getElementById('conv-toggle-row');
       if(ctr) ctr.style.display='flex';
+      // Morning SGD hint for THB/RP customers
+      var sh = document.getElementById('sgd-hint');
+      if(sh) sh.style.display = _cgIsForeign ? 'block' : 'none';
     },100);
     document.getElementById('amt-input').addEventListener('input',updateConvPrev);
     document.getElementById('amt-input').addEventListener('keydown',function(e){
@@ -9240,6 +9279,188 @@ document.addEventListener('wheel',function(e){
     if(!inModal) document.activeElement.blur();
   }
 },{passive:true});
+
+// ============================================================================
+// BRIDGE — the ONLY way the independent auditor mutates business data, and only
+// ever on an EXPLICIT operator tap on a big card. Detection stays 100% read-only.
+// ============================================================================
+function MGApplyFix(id, patch){
+  try {
+    var i = entries.findIndex(function(e){ return e && e._id===id; });
+    if(i < 0) return false;
+    if(typeof pushUndo==='function') pushUndo();
+    if(typeof _logOp==='function') _logOp('audit_fix', '按安全检查修正：'+(entries[i].name||''), {snap: entries});
+    Object.keys(patch).forEach(function(k){ entries[i][k] = patch[k]; });
+    entries[i].updatedAt = Date.now();
+    if(typeof saveEntries==='function') saveEntries();
+    if(typeof renderAll==='function') renderAll();
+    return true;
+  } catch(e){ console.warn('MGApplyFix failed:', e); return false; }
+}
+
+// ============================================================================
+// MGAudit — INDEPENDENT, READ-ONLY supervisory auditor.
+// Reads ONLY raw localStorage; never touches the working system's in-memory
+// state or functions; has its own timer, UI and log (mg_audit_log). It never
+// mutates business data — the only writes are its own log + an append-only
+// safety backup; corrections happen solely through MGApplyFix on operator tap.
+// ============================================================================
+(function MGAudit(){
+  'use strict';
+  var LOG_KEY = 'mg_audit_log';
+  var TOMB_KEY = 'mg_tombstones';
+  var BK_KEY  = 'mg_overwrite_backups';   // existing recovery pool (append-only here)
+  var sessionDismissed = {};              // notify sigs muted for this session
+  var cardOpen = false;
+
+  // ---- isolated helpers (no app functions / globals) ----
+  function gj(k, d){ try{ var v=localStorage.getItem(k); return v==null?d:JSON.parse(v); }catch(e){ return d; } }
+  function isNum(x){ return typeof x==='number' && isFinite(x); }
+  function round(v, dp){ var f=Math.pow(10,dp); return Math.round((v+Number.EPSILON)*f)/f; }
+  function todayName(){
+    try { return new Date().toLocaleDateString('en-MY',{day:'numeric',month:'numeric',year:'numeric'}); }
+    catch(e){ var d=new Date(); return d.getDate()+'/'+(d.getMonth()+1)+'/'+d.getFullYear(); }
+  }
+  function fmtMoney(cur, v){
+    if(cur==='IDR') return 'IDR '+Math.round(v).toLocaleString();
+    return cur+' '+round(v,2).toFixed(2);
+  }
+
+  // ---- the scan: returns findings, mutates NOTHING ----
+  function scan(){
+    var findings = [];
+    var entries = gj('mg_entries', null);
+    var charts  = gj('mg_charts', null);
+
+    // Structural corruption (NOTIFY — operator can't fix)
+    if(entries !== null && !Array.isArray(entries))
+      findings.push({ level:'notify', sig:'struct:entries', msg:'今日记录的存储格式不对' });
+    if(charts !== null && !Array.isArray(charts))
+      findings.push({ level:'notify', sig:'struct:charts', msg:'表格的存储格式不对' });
+
+    // Two charts share the same day-name (Bug-1 pollution residue) — NOTIFY
+    if(Array.isArray(charts)){
+      var nameCount = {};
+      charts.forEach(function(c){ if(c&&c.name){ var k=String(c.name).trim(); nameCount[k]=(nameCount[k]||0)+1; } });
+      Object.keys(nameCount).forEach(function(k){
+        if(nameCount[k] >= 2) findings.push({ level:'notify', sig:'dupchart:'+k, msg:'有两张同一天（'+k+'）的表格' });
+      });
+    }
+
+    // Conversion-math check (ASK — operator decides) — the absolute math rule
+    if(Array.isArray(entries)){
+      entries.forEach(function(e){
+        if(!e || !e.conv || e.amountUserEdited) return;     // no provenance, or user-rounded → exempt
+        var c = e.conv;
+        if(!(isNum(c.sgd) && c.sgd>0 && isNum(c.mult) && c.mult>0)) return;  // incomplete provenance
+        var dp = c.target==='IDR' ? 0 : 2;
+        var tol = c.target==='IDR' ? 0.5 : 0.005;
+        var expAmt = round(c.sgd * c.mult, dp);
+        if(!isNum(e.amount) || Math.abs(e.amount - expAmt) > tol){
+          var patch = { amount: expAmt, amountUserEdited:false };
+          if(c.target==='RM'){ patch.rmAmount = expAmt; }
+          else if(c.target==='IDR'){ patch.rmAmount = 0; }
+          else if(c.target==='THB'){ patch.rmAmount = isNum(c.thb)&&c.thb>0 ? round(expAmt*c.thb,2) : (e.rmAmount||0); }
+          findings.push({
+            level:'ask', sig:'conv:'+e._id+':'+expAmt,
+            title:'这笔换算好像不对',
+            body:'<b>'+(e.name||'')+'</b><br>新币 SGD '+round(c.sgd,2).toFixed(2)+
+                 ' 应该换成 <b style="color:var(--green)">'+fmtMoney(c.target,expAmt)+'</b>，'+
+                 '但现在写的是 <b style="color:var(--red)">'+fmtMoney(e.currency||c.target, e.amount)+'</b>。',
+            yes:'改成 '+fmtMoney(c.target,expAmt),
+            no:'保持现在（我自己改过）',
+            onYes: function(){ MGApplyFix(e._id, patch); },
+            onNo:  function(){ MGApplyFix(e._id, { amountUserEdited:true }); }
+          });
+        }
+      });
+    }
+    return findings;
+  }
+
+  // ---- append-only safety backup (for unfixable NOTIFY problems) ----
+  function safetyBackup(reason){
+    try {
+      var pool = gj(BK_KEY, []);
+      pool.unshift({ ts:Date.now(), replacedAt:new Date().toISOString(),
+        original:{ id:'audit_'+Date.now(), name:'安全检查自动备份（'+reason+'）', date:new Date().toISOString(),
+                   entries:[], charts: gj('mg_charts', []) } });
+      if(pool.length > 12) pool = pool.slice(0,12);
+      localStorage.setItem(BK_KEY, JSON.stringify(pool));
+    } catch(e){ console.warn('audit safetyBackup failed:', e); }
+  }
+  function logFinding(f){
+    try {
+      var log = gj(LOG_KEY, []);
+      log.unshift({ ts:Date.now(), level:f.level, sig:f.sig, msg:f.title||f.msg||'' });
+      if(log.length > 200) log = log.slice(0,200);
+      localStorage.setItem(LOG_KEY, JSON.stringify(log));
+    } catch(e){}
+  }
+
+  // ---- UI: status light + one big card at a time ----
+  function setLight(bad){
+    var el = document.getElementById('audit-light'); if(!el) return;
+    if(bad){ el.textContent='⚠ 有问题，请看提示'; el.style.background='rgba(255,61,82,.16)'; el.style.color='var(--red)'; el.style.borderColor='rgba(255,61,82,.55)'; }
+    else   { el.textContent='✓ 数据正常';        el.style.background='rgba(0,212,144,.14)'; el.style.color='var(--green)'; el.style.borderColor='rgba(0,212,144,.45)'; }
+  }
+  function busy(){
+    if(document.querySelector('.modal-overlay:not(.hidden)')) return true;
+    var ae = document.activeElement;
+    if(ae && (ae.tagName==='INPUT'||ae.tagName==='SELECT'||ae.tagName==='TEXTAREA')) return true;
+    return false;
+  }
+  function closeCard(){ var c=document.getElementById('audit-card'); if(c) c.remove(); cardOpen=false; }
+  function showCard(f){
+    closeCard(); cardOpen = true;
+    var ov = document.createElement('div');
+    ov.id='audit-card';
+    ov.style.cssText='position:fixed;inset:0;z-index:10002;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;font-family:IBM Plex Sans,sans-serif';
+    var isAsk = f.level==='ask';
+    var inner = isAsk
+      ? '<div style="font-size:21px;font-weight:800;color:var(--red);margin-bottom:12px">⚠ '+(f.title||'需要你确认')+'</div>'+
+        '<div style="font-size:17px;line-height:1.6;color:var(--text)">'+(f.body||'')+'</div>'+
+        '<div style="display:flex;flex-direction:column;gap:12px;margin-top:22px">'+
+          '<button id="ac-yes" style="min-height:60px;border-radius:13px;border:none;background:var(--green);color:#fff;font-size:18px;font-weight:700;cursor:pointer">'+f.yes+'</button>'+
+          '<button id="ac-no"  style="min-height:56px;border-radius:13px;border:2px solid var(--border2);background:var(--surface2);color:var(--text2);font-size:16px;font-weight:600;cursor:pointer">'+f.no+'</button>'+
+        '</div>'
+      : '<div style="font-size:21px;font-weight:800;color:var(--orange);margin-bottom:12px">⚠ 数据好像有点问题</div>'+
+        '<div style="font-size:17px;line-height:1.6;color:var(--text)">'+(f.msg||'')+'<br><br>系统已经自动备份好了，请联系老板检查。</div>'+
+        '<div style="display:flex;margin-top:22px"><button id="ac-ok" style="flex:1;min-height:60px;border-radius:13px;border:none;background:var(--orange);color:#fff;font-size:18px;font-weight:700;cursor:pointer">知道了</button></div>';
+    ov.innerHTML = '<div style="background:var(--surface);border:3px solid '+(isAsk?'var(--red)':'var(--orange)')+';border-radius:18px;padding:26px 26px;max-width:94vw;width:540px;box-shadow:0 16px 56px rgba(0,0,0,.7)">'+inner+'</div>';
+    document.body.appendChild(ov);
+    if(isAsk){
+      document.getElementById('ac-yes').addEventListener('click', function(){ try{ f.onYes&&f.onYes(); }catch(e){} closeCard(); tick(); });
+      document.getElementById('ac-no').addEventListener('click',  function(){ try{ f.onNo&&f.onNo();  }catch(e){} closeCard(); tick(); });
+    } else {
+      safetyBackup(f.sig||'struct');
+      sessionDismissed[f.sig]=1;
+      document.getElementById('ac-ok').addEventListener('click', function(){ closeCard(); tick(); });
+    }
+  }
+
+  function tick(){
+    var findings = scan();
+    var actionable = findings.filter(function(f){ return f.level==='ask' || !sessionDismissed[f.sig]; });
+    setLight(actionable.length > 0);
+    if(actionable.length){
+      actionable.forEach(logFinding);
+      if(!cardOpen && !busy()) showCard(actionable[0]);   // one at a time; re-checks after each
+    }
+  }
+
+  // manual open from the status light
+  window.MGAuditOpen = function(){
+    var findings = scan().filter(function(f){ return f.level==='ask' || !sessionDismissed[f.sig]; });
+    if(findings.length){ if(!cardOpen) showCard(findings[0]); }
+    else { closeCard(); var el=document.getElementById('audit-light'); if(el){ el.textContent='✓ 数据正常'; setTimeout(function(){ setLight(false); }, 50); } }
+  };
+
+  // independent schedule: run on load, every 10s, and after any storage write
+  setTimeout(tick, 2500);
+  setInterval(tick, 10000);
+  window.addEventListener('storage', function(){ setTimeout(tick, 200); });
+})();
 </script>
 </body>
 </html>
