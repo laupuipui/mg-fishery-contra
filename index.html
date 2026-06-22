@@ -5395,6 +5395,52 @@ function _cdFixV1(){
   } catch(e){ console.warn('_cdFixV1 failed:', e); }
 }
 
+// ── ONE-TIME FRESH START (v1) — wipe today clean and restart C/D from today ──
+// The whole-wipe mis-restore corrupted today (it showed yesterday's data). User chose a
+// clean slate for today. Runs ONCE per device, date-bounded, fully reversible (backs up
+// first). Removes today's live rows (tombstoned so they don't sync back), empties today's
+// chart, and points C/D start at today so NO polluted past is ever carried forward.
+function _freshStartV1(){
+  try {
+    if(localStorage.getItem('mg_fresh_start_v1')) return;
+    var todayKey = new Date().toISOString().slice(0,10);
+    if(todayKey > '2026-06-30'){ localStorage.setItem('mg_fresh_start_v1','expired'); return; }
+    var tn = _todayDateStr();
+    var ent = JSON.parse(localStorage.getItem(ENTRIES_KEY)||'[]');
+    var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
+    // 1) back up current state (recoverable via 数据恢复)
+    try {
+      var bk = JSON.parse(localStorage.getItem('mg_overwrite_backups')||'[]');
+      bk.unshift({ ts:Date.now(), replacedAt:new Date().toISOString(),
+        original:{ id:'fresh_'+Date.now(), name:'全新开始前备份', date:new Date().toISOString(),
+                   entries:(Array.isArray(ent)?ent:[]), charts:(Array.isArray(charts)?charts:[]) } });
+      localStorage.setItem('mg_overwrite_backups', JSON.stringify(bk.slice(0,14)));
+    } catch(e){}
+    // 2) tombstone the stray live rows so sync won't bring them back
+    if(Array.isArray(ent) && ent.length && typeof _addTombstones==='function') _addTombstones(ent.map(function(e){ return e && e._id; }).filter(Boolean));
+    // 3) empty live + today's chart, bind to the empty today chart
+    entries = [];
+    var t = Array.isArray(charts) ? charts.find(function(c){ return c && c.name && c.name.trim()===tn; }) : null;
+    if(t){ t.entries=[]; t.date=new Date().toISOString(); }
+    else { t={ id:Date.now(), name:tn, date:new Date().toISOString(), entries:[], rates:{} }; charts.unshift(t); }
+    safeSetItem(CHARTS_KEY, JSON.stringify(charts));
+    safeSetItem(ENTRIES_KEY, '[]');
+    if(typeof _setCurrentChart==='function') _setCurrentChart(t.id, tn);
+    localStorage.setItem('mg_last_active_chart_date', todayKey);
+    // 4) C/D restarts from today; never carry the polluted past
+    localStorage.setItem('mg_cd_live_start', todayKey);
+    localStorage.setItem('mg_autocarry_date', todayKey);
+    // 5) mark legitimate so the watchdog won't fight it; clear stale last-good
+    if(typeof _logOp==='function') _logOp('clear','全新开始：清空今日');
+    if(typeof _bumpAction==='function') _bumpAction();
+    try { localStorage.removeItem('mg_audit_lastgood'); } catch(e){}
+    localStorage.setItem('mg_fresh_start_v1', new Date().toISOString());
+    if(typeof renderAll==='function') renderAll();
+    if(typeof updateCDBadge==='function') updateCDBadge();
+    if(typeof _showSuccessToast==='function') _showSuccessToast('今天已全新开始（已备份），C/D 从今天起算，不带入过往');
+  } catch(e){ console.warn('_freshStartV1 failed:', e); }
+}
+
 // ── C/D reconciliation: compare each carried entry against its source's remaining ──
 function _fmtByGroup(group, currency, amt){
   if(currency==='SGD') return 'SGD '+fmtN(amt);
@@ -9677,6 +9723,7 @@ function init(){
     checkLoginRequiredOverlay();
     _checkDailyChartRotation();
     if(typeof _cdFixV1 === 'function') _cdFixV1();   // one-time cleanup of today's wrongly-carried C/D
+    if(typeof _freshStartV1 === 'function') _freshStartV1();   // one-time clean slate for today (post-corruption)
     if(typeof _autoCarryCD === 'function') setTimeout(function(){ _autoCarryCD(); }, 700);  // auto-bring outstanding C/D (once/day)
     _checkDailyExcelBackup();
     _checkDailyRatesReminder();
@@ -9968,15 +10015,17 @@ function MGApplyFix(id, patch){
       Object.keys(cur.ids).forEach(function(id){ if(!snap.ids[id]) added.push(id); });
       Object.keys(snap.ids).forEach(function(id){ if(!cur.ids[id]) removed.push(id); });
       var lg=gj(LG,null);
+      // Only ever restore a SAME-DAY last-good (never silently bring back yesterday's data).
+      var lgT = lg && Array.isArray(lg.entries) && lg.at && (new Date(lg.at).toISOString().slice(0,10)===new Date().toISOString().slice(0,10));
       if(added.length||removed.length){
         F.push({sev:'high',code:'ghost_member',auto:true,msg:'已自动拦下一次幽灵客户变动（无操作下 +'+added.length+' / -'+removed.length+'）',
-          repair:function(){ if(lg&&Array.isArray(lg.entries)) writeEntries(lg.entries,'幽灵客户'); }});
+          repair:function(){ if(lgT) writeEntries(lg.entries,'幽灵客户'); }});
       } else {
         var fieldGhost=false;
         Object.keys(cur.fields).forEach(function(id){ var a=cur.fields[id],b=snap.fields[id]; if(!b)return; ['a','c1','y','h','ca','b'].forEach(function(k){ if((a[k]||0)!==(b[k]||0)) fieldGhost=true; }); });
         if(fieldGhost){
           F.push({sev:'high',code:'ghost_field',auto:true,msg:'已自动拦下一次幽灵金额/分配变动（无操作下数值自己变）',
-            repair:function(){ if(lg&&Array.isArray(lg.entries)) writeEntries(lg.entries,'幽灵金额'); }});
+            repair:function(){ if(lgT) writeEntries(lg.entries,'幽灵金额'); }});
         } else if(cur.rates!==snap.rates && !recentOp(['sync_apply'],6000)){
           F.push({sev:'med',code:'ghost_rate',auto:true,msg:'已自动还原一次幽灵汇率变动',
             repair:function(){ if(lg&&lg.rates){ sset('mg_rates',lg.rates); } snap=null; }});
@@ -10038,13 +10087,27 @@ function MGApplyFix(id, patch){
     // chart rules
     if(Array.isArray(charts)){
       var nc={}; charts.forEach(function(c){ if(c&&c.name){var k=String(c.name).trim(); nc[k]=(nc[k]||0)+1;} });
-      Object.keys(nc).forEach(function(k){ if(nc[k]>=2) F.push({sev:'med',code:'dupchart:'+k,msg:'有两张同一天（'+k+'）的表格'}); });
+      var _tnAud=(function(){try{return new Date().toLocaleDateString('en-MY',{day:'numeric',month:'numeric',year:'numeric'});}catch(e){return '';}})();
+      Object.keys(nc).forEach(function(k){ if(nc[k]>=2) F.push({sev:(k===_tnAud?'med':'low'),code:'dupchart:'+k,msg:'有两张同一天（'+k+'）的表格'}); });
     }
-    // R7 whole-wipe with no operation
-    if(snap && Object.keys(snap.ids).length>0 && entries.length===0 && !recentOp(['delete','batch_delete','clear','load','sync_apply'],30000)){
-      var lg2=gj(LG,null);
-      F.push({sev:'high',code:'wipe',auto:true,msg:'今日记录整盘清空（无任何删除/清空操作），已自动恢复',
-        repair:function(){ if(lg2&&Array.isArray(lg2.entries)&&lg2.entries.length) writeEntries(lg2.entries,'整盘清空恢复'); }});
+    // R7 whole-wipe — ONLY when TRULY unexplained: no app action (curSeq===snap.seq) AND no
+    // delete/clear/load/sync op AND a SAME-DAY last-good to offer. This MUST NOT fire on the
+    // daily rotation (which legitimately empties `entries` and DOES bump the action counter)
+    // — the old version ignored the counter and silently restored YESTERDAY's data onto
+    // today, which is what caused the whole "today shows yesterday" + duplicate-CD disaster.
+    // It now ASKS the operator and never auto-restores stale (cross-day) data.
+    var _lg7=gj(LG,null);
+    var _today7=new Date().toISOString().slice(0,10);
+    var _lg7Today = _lg7 && _lg7.at && Array.isArray(_lg7.entries) && _lg7.entries.length>0 &&
+                    (new Date(_lg7.at).toISOString().slice(0,10)===_today7);
+    if(snap && curSeq===snap.seq && Object.keys(snap.ids).length>0 && entries.length===0 &&
+       !recentOp(['delete','batch_delete','clear','load','sync_apply'],30000) && _lg7Today){
+      F.push({sev:'high',code:'wipe',
+        card:{ title:'今天的记录好像被清空了',
+          body:'今天的客户突然变空了，而且不是你点的删除/清空。要不要恢复到刚才的 '+_lg7.entries.length+' 条？',
+          yes:'恢复刚才的记录', no:'不用，是我清的',
+          onYes:function(){ writeEntries(_lg7.entries,'整盘清空-用户确认恢复'); },
+          onNo:function(){ snap=null; } } });
     }
     return F;
   }
