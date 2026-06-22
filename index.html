@@ -200,6 +200,9 @@ body.light .contra-table tr.overpaid td{background:rgba(234,108,26,.18)}
 @keyframes fadeInUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
 .sgd-pending-badge{display:inline-block;background:#f59e0b;color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;margin-left:4px;vertical-align:middle}
 .overpaid-badge{display:inline-block;background:var(--orange);color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;margin-left:4px;vertical-align:middle}
+.advance-badge{display:inline-block;background:var(--red,#ff3d52);color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;margin-left:4px;vertical-align:middle}
+.contra-table tr.advance td{background:rgba(255,61,82,.12)}
+.contra-table tr.advance .num{color:var(--red,#ff3d52);font-weight:700}
 .del-btn{background:none;border:1px solid var(--border);color:var(--text3);width:22px;height:22px;border-radius:4px;cursor:pointer;font-size:13px;display:flex;align-items:center;justify-content:center;transition:all .15s;flex-shrink:0}
 .del-btn:hover{border-color:var(--red);color:var(--red);background:rgba(255,61,82,.12)}
 .edit-btn{background:none;border:1px solid var(--border);color:var(--accent);width:22px;height:22px;border-radius:4px;cursor:pointer;font-size:11px;display:flex;align-items:center;justify-content:center;transition:all .15s;flex-shrink:0}
@@ -1546,6 +1549,7 @@ function applySnapshot(data, applyEntries) {
     if(typeof _logOp==='function') _logOp('sync_apply', '云端同步：本地记录被 Drive 覆盖（'+(entries?entries.length:0)+' → '+data.entries.length+' 条）', {snap: entries});
     entries = data.entries;
     safeSetItem('mg_entries', JSON.stringify(entries));
+    if(typeof _bumpAction==='function') _bumpAction();   // sync-apply is a legitimate change
     changed = true;
     // Only link to TODAY's chart — never link to historical charts (rotation will handle stale entries)
     if(Array.isArray(data.charts) && entries.length > 0){
@@ -2517,6 +2521,24 @@ let newCustState = {};
 let currentChartId = null;  // ID of currently loaded chart (for Save overwrite)
 let currentChartName = null;
 
+// Read-only history viewer state. When set, the user is LOOKING at a past day's
+// chart in an isolated overlay — the live `entries` (today) is never touched, so
+// viewing history can never overwrite today. null = working on the live set.
+var _historyView = null;
+
+// Persist the current chart binding so a reload restores the EXACT chart instead of
+// guessing via JSON-equality. `entries` always belongs to this bound chart.
+function _setCurrentChart(id, name){
+  currentChartId = (id===undefined) ? currentChartId : id;
+  currentChartName = (name===undefined) ? currentChartName : (name ? String(name).trim() : name);
+  try {
+    if(currentChartId!=null) localStorage.setItem('mg_current_chart_id', String(currentChartId));
+    else localStorage.removeItem('mg_current_chart_id');
+    if(currentChartName) localStorage.setItem('mg_current_chart_name', currentChartName);
+    else localStorage.removeItem('mg_current_chart_name');
+  } catch(e){}
+}
+
 let isLight    = localStorage.getItem('mg_theme')  === 'light';
 let isEng      = localStorage.getItem('mg_lang')   === 'eng';
 
@@ -2758,14 +2780,86 @@ function updateUndoBtns(){
 // ======================================================
 // PERSIST  (local + Google Drive)
 // ======================================================
+// Per-operation persistence: write the live `entries` straight into the chart that
+// `entries` belongs to (currentChartId/Name) on EVERY save, so mg_charts and
+// mg_entries never diverge. This is what makes data loss impossible — a reload/sync
+// always finds the same data in the bound chart. Lightweight (no per-call snapshot).
+function _persistCurrentChart(){
+  try {
+    var name = currentChartName || _todayDateStr();
+    var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
+    var idx = -1;
+    if(currentChartId!=null) idx = charts.findIndex(function(c){ return c && String(c.id)===String(currentChartId); });
+    if(idx < 0) idx = charts.findIndex(function(c){ return c && c.name && c.name.trim()===name; });
+    var rsnap = {sgd:rates.sgd, thb:rates.thb, idr:rates.idr, sgdThb:rates.sgdThb, sgdIdr:rates.sgdIdr};
+    if(idx >= 0){
+      charts[idx].entries = JSON.parse(JSON.stringify(entries));
+      charts[idx].date = new Date().toISOString();
+      // Only update rates when we actually have some (never wipe good rates with empty).
+      if(rsnap.sgd||rsnap.thb||rsnap.idr||rsnap.sgdThb||rsnap.sgdIdr) charts[idx].rates = rsnap;
+      if(currentChartId==null) _setCurrentChart(charts[idx].id, charts[idx].name);
+    } else {
+      var nc = { id:(currentChartId!=null?currentChartId:Date.now()), name:name, date:new Date().toISOString(),
+                 entries:JSON.parse(JSON.stringify(entries)), rates:rsnap };
+      charts.unshift(nc);
+      if(charts.length>365) charts.pop();
+      _setCurrentChart(nc.id, nc.name);
+    }
+    safeSetItem(CHARTS_KEY, JSON.stringify(charts));
+  } catch(e){ console.warn('_persistCurrentChart failed:', e); }
+}
+
+// Tablet anti-misfire: a quick-alloc button (.qa-btn) must only fire on a real TAP.
+// If the finger moved (scrolling/swiping over the button), block the click so it
+// never allocates by accident. Capture-phase listener runs before the inline onclick.
+function _setupQaTapGuard(){
+  var sx=0, sy=0, moved=false, tracking=false;
+  document.addEventListener('touchstart', function(e){
+    var btn = e.target.closest && e.target.closest('.qa-btn');
+    if(!btn){ tracking=false; return; }
+    tracking=true; moved=false;
+    var t=e.touches&&e.touches[0]; if(!t) return;
+    sx=t.clientX; sy=t.clientY;
+  }, {passive:true, capture:true});
+  document.addEventListener('touchmove', function(e){
+    if(!tracking) return;
+    var t=e.touches&&e.touches[0]; if(!t) return;
+    if(Math.abs(t.clientX-sx)>10 || Math.abs(t.clientY-sy)>10) moved=true;
+  }, {passive:true, capture:true});
+  document.addEventListener('click', function(e){
+    var btn = e.target.closest && e.target.closest('.qa-btn');
+    if(!btn) return;
+    if(moved){ e.stopImmediatePropagation(); e.preventDefault(); }
+    moved=false; tracking=false;
+  }, true);  // capture — runs before the button's inline onclick, so it can cancel it
+}
+
+// ── Hooks for the independent watchdog (MGAudit) ──
+// _bumpAction: every LEGITIMATE change to the live set bumps this counter, so the
+// watchdog can tell an explained change (counter moved) from a ghost (it didn't).
+function _bumpAction(){
+  try { localStorage.setItem('mg_action_seq', String((parseInt(localStorage.getItem('mg_action_seq')||'0')+1))); } catch(e){}
+}
+// MGReloadEntries: the watchdog calls this after an auto-repair so the in-memory
+// `entries` + the screen re-sync to the corrected localStorage.
+function MGReloadEntries(){
+  try {
+    entries = JSON.parse(localStorage.getItem(ENTRIES_KEY)||'[]');
+    if(typeof renderAll === 'function') renderAll();
+  } catch(e){ console.warn('MGReloadEntries failed:', e); }
+}
+
 function saveEntries(skipSnapshot){
   // Entries auto-pushed to Drive (debounced) so work isn't lost on disconnect/relogin
   var ok = safeSetItem(ENTRIES_KEY, JSON.stringify(entries));
   localStorage.setItem('mg_last_write', Date.now().toString());
+  _bumpAction();                   // a legitimate change just happened (for the watchdog)
+  if(ok === false){ try { localStorage.setItem('mg_save_failed', String(Date.now())); } catch(e){} }  // R13 signal
+  _persistCurrentChart();          // per-operation chart save — entries never diverge from its chart
   if(!skipSnapshot) saveLocalSnapshot();
   _pushToDrive();
-  // Mark as unsaved to trigger save button warning + auto-save timer
-  if(typeof markUnsaved === 'function') markUnsaved();
+  // Bound chart is now in sync with entries → mark saved (button shows ✅).
+  if(typeof markSaved === 'function') markSaved();
   return ok;  // false if localStorage write failed (quota) — callers can react
 }
 
@@ -3185,6 +3279,7 @@ function closeModal(id){
 // RENDER ALL
 // ======================================================
 function renderAll(){
+  if(typeof _updateEditingBanner==='function') _updateEditingBanner();
   const container=document.getElementById('tables-container');
   container.innerHTML='';
   let grandRM=0,grandACT=0,grandYES=0,grandHS=0,grandCASH=0,grandIDR=0,grandBTH=0,grandTHB=0;
@@ -3290,10 +3385,15 @@ function renderAll(){
       const isUnalloc    = isUnderAlloc || isOverAlloc;
       const isHidden=entry.hidden||false;
       const isSGDpend=entry.sgdPending||false;
-      const rowCls=isCD?'cd-row':isOverAlloc?'overpaid':isUnderAlloc?'unallocated':'';
+      const isAdvance=(entry.amount||0)<0;   // advanced payment / overpay (negative amount)
+      // Row color follows BALANCE state only (red = still has an unallocated balance,
+      // white/normal = balanced). C/D rows are NOT specially colored — they're identified
+      // by the C/D badge — so a balanced C/D row looks like a normal customer.
+      const rowCls=isAdvance?'advance':isOverAlloc?'overpaid':isUnderAlloc?'unallocated':'';
       const nameDisp=entry.name
         +(isCD?`<span class="cd-badge">C/D</span>`:'')
-        +(isOverAlloc?`<span class="overpaid-badge">超付</span>`:'')
+        +(isAdvance?`<span class="advance-badge">超付/预付</span>`:'')
+        +(isOverAlloc&&!isAdvance?`<span class="overpaid-badge">超付</span>`:'')
         +(isSGDpend?`<span class="sgd-pending-badge">SGD⏳</span>`:'');
 
       const tr=document.createElement('tr');
@@ -3484,6 +3584,7 @@ function updateAlloc(id,field,val){
   // Reset cdHidden flag — user is actively editing, may want CD candidate again
   if(e.cdHidden) delete e.cdHidden;
   saveEntries();
+  if(typeof _cdSyncChain==='function') _cdSyncChain(e);   // live C/D: allocation change → update descendants
 }
 
 // Live update: only refreshes balance row + grand totals, keeps focus
@@ -3750,7 +3851,9 @@ function quickAlloc(id, field){
     e[field] = total;
   }
   e.updatedAt = Date.now();
-  saveEntries(); renderAll();
+  saveEntries();
+  if(typeof _cdSyncChain==='function') _cdSyncChain(e);
+  renderAll();
 }
 
 // ACT quick-fill that takes the rounded-down value, toggling hundreds <-> tens on each click.
@@ -3772,7 +3875,30 @@ function actRound(id){
   e.act = val;
   e.updatedAt = Date.now();
   if(e.cdHidden) delete e.cdHidden;
-  saveEntries(); renderAll();
+  saveEntries();
+  if(typeof _cdSyncChain==='function') _cdSyncChain(e);
+  renderAll();
+}
+
+// CASH quick-fill: put the CURRENT remaining balance into CASH, KEEPING the other
+// allocations (ACT/YES/HS/BT). For leaving small cash amounts as the leftover.
+function cashFill(id){
+  var idx = entries.findIndex(function(x){ return x._id===id; });
+  if(idx<0) return;
+  var e = entries[idx];
+  var isRP=e.group==='RP', isTHB=e.group==='THB';
+  var total=(isRP||isTHB)?(e.amount||0):(e.rmAmount||0);
+  var other = isRP ? ((e.btHeng||0)+(e.yes||0)+(e.hs||0)) : ((e.act||0)+(e.yes||0)+(e.hs||0));
+  var fill = total - other;
+  if(fill<0) fill=0;   // over-allocated → nothing left for cash
+  if(typeof _logOp==='function') _logOp('alloc','现金填余额：'+(e.name||'')+' → '+fmtN(fill));
+  pushUndo();
+  e.cash = fill;
+  e.updatedAt = Date.now();
+  if(e.cdHidden) delete e.cdHidden;
+  saveEntries();
+  if(typeof _cdSyncChain==='function') _cdSyncChain(e);
+  renderAll();
 }
 
 // Per-row quick-action buttons, group-aware. THB only needs HS; RP uses BT; RM uses ACT(进位).
@@ -3783,7 +3909,7 @@ function _qaButtonsHTML(gi, group, small){
   }
   var hs   = btn('qa-hs',   "quickAlloc('"+gi+"','hs')",   'HS',  '全给 HS');
   var yes  = btn('qa-yes',  "quickAlloc('"+gi+"','yes')",  'YES', '全给 YES');
-  var cash = btn('qa-cash', "quickAlloc('"+gi+"','cash')", 'CSH', '全给 CASH');
+  var cash = btn('qa-cash', "cashFill('"+gi+"')", 'CSH', '填入剩余余额到 CASH');
   if(group==='THB') return hs;                                   // THB 只用 HS
   if(group==='RP')  return btn('qa-act', "quickAlloc('"+gi+"','act')", 'BT', '全给 BT HENG') + yes + hs + cash;
   return btn('qa-act', "actRound('"+gi+"')", 'ACT', 'ACT 进位（点击切换 百位/十位）') + yes + hs + cash;
@@ -3796,6 +3922,9 @@ function deleteEntry(id){
   if(typeof _logOp==='function') _logOp('delete', '删除客户：'+entries[idx].name, {snap: entries});
   pushUndo();
   var _delId = entries[idx]._id;
+  // R10 intent marker: record the id we're deleting so the watchdog can verify the
+  // delete actually took effect (and re-apply / alert if the row is still there).
+  try { localStorage.setItem('mg_lastdel', JSON.stringify({ at:Date.now(), ids:[_delId] })); } catch(e){}
   entries.splice(idx,1);
   if(_delId) _addTombstones([_delId]);   // deletion sticks across devices
   saveEntries(); renderAll();
@@ -3891,7 +4020,9 @@ function confirmEdit(idx){
     entries[idx].rmAmount = toRM(amt, cur);
     entries[idx].sgdPending = false;
   }
-  saveEntries(); closeModal('modal-add'); renderAll();
+  saveEntries();
+  if(typeof _cdSyncChain==='function') _cdSyncChain(entries[idx]);   // live C/D: keep the chain consistent
+  closeModal('modal-add'); renderAll();
 }
 
 // ======================================================
@@ -3952,6 +4083,7 @@ function renderModalStep(){
       <label>${t('modal_amt_lbl')}</label>
       <input type="text" inputmode="decimal" id="amt-input" placeholder="0.00 或 100+200*3" style="font-size:20px;font-weight:700" autofocus oninput="_updateAmtCalc()">
       <div id="amt-calc-preview" style="font-size:11px;color:var(--text3);margin-top:4px;font-family:'IBM Plex Mono',monospace;min-height:14px"></div>
+      <div style="font-size:11px;color:var(--text3);margin-top:2px">💳 超付/预付请输入负数（例如 -500）</div>
       <label style="margin-top:14px">${t('modal_cur_lbl')}</label>
       <div class="currency-chips">
         <div class="chip selected" onclick="selCur('RM',this)">RM</div>
@@ -4354,13 +4486,14 @@ function _updateAmtCalc(){
 function confirmAmt(){
   const raw=document.getElementById('amt-input')?.value;
   const amt=_parseAmtExpr(raw);
-  if(!amt||isNaN(amt)||amt<=0){ alert(typeof isEng !== 'undefined' && isEng ? 'Please enter a valid amount (or expression like 100+200*3)' : '请输入有效金额（或算式如 100+200*3、500/2）'); return; }
+  // Allow NEGATIVE amounts (advanced payment / overpay). Only reject 0 / non-number.
+  if(isNaN(amt)||amt===0){ alert(typeof isEng !== 'undefined' && isEng ? 'Please enter a valid amount (negative allowed for overpay, e.g. -500)' : '请输入有效金额（超付/预付输入负数，例如 -500）'); return; }
   const convertTo = modalState.convertTo;
   const cur = modalState.currency||'RM';
   if(convertTo && convertTo !== cur){
-    // User opted to convert
-    var converted = convertCur(amt, cur, convertTo);
-    if(converted <= 0){
+    // User opted to convert — sign-aware so negatives convert correctly
+    var converted = Math.sign(amt) * convertCur(Math.abs(amt), cur, convertTo);
+    if(converted === 0){
       alert(isEng ? 'Required rate not set. Cannot convert.' : '所需汇率未设置，无法换算。');
       return;
     }
@@ -4533,6 +4666,9 @@ function finalConfirm(){
   }
   pushUndo();
   const newId = entry._id;
+  // R9 intent marker: record the customer we're adding so the watchdog can verify it
+  // actually landed (and re-add it if the add silently failed).
+  try { localStorage.setItem('mg_lastadd', JSON.stringify({ at:Date.now(), entry: entry })); } catch(e){}
   entries.push(entry);
   saveEntries();
   markUnsaved();
@@ -4763,11 +4899,11 @@ let _cdItems = [];
 // Compute unallocated amount + currency for an entry
 function _cdComputeUnalloc(e){
   if(!e) return null;
-  // SGD-pending: entire amount is "unalloc" (waiting for rate)
+  // SGD-pending: entire amount is "unalloc" (waiting for rate). Negative = advance/overpay.
   if(e.currency === 'SGD' || e.sgdPending){
     var sgdAmt = e.amount || e.sgdAmount || 0;
-    if(sgdAmt <= 0) return null;
-    return { totalAmt: sgdAmt, allocSum: 0, remaining: sgdAmt, isSGDPending: true, currency: 'SGD' };
+    if(sgdAmt === 0) return null;
+    return { totalAmt: sgdAmt, allocSum: 0, remaining: sgdAmt, isSGDPending: true, isAdvance: sgdAmt<0, currency: 'SGD' };
   }
   var totalAmt, allocSum;
   if(e.group === 'RP'){
@@ -4778,18 +4914,27 @@ function _cdComputeUnalloc(e){
     allocSum = (e.act||0) + (e.yes||0) + (e.hs||0) + (e.cash||0);
   } else {
     // Fallback: if rmAmount is missing/0 but it's an RM-currency entry, use amount,
-    // so data-glitch rows aren't silently dropped from C/D.
-    totalAmt = (e.rmAmount && e.rmAmount > 0) ? e.rmAmount : (e.currency === 'RM' ? (e.amount || 0) : 0);
+    // so data-glitch rows aren't silently dropped from C/D. Allow negative (advance).
+    totalAmt = (e.rmAmount && e.rmAmount !== 0) ? e.rmAmount : (e.currency === 'RM' ? (e.amount || 0) : 0);
     allocSum = (e.act||0) + (e.yes||0) + (e.hs||0) + (e.cash||0);
   }
-  if(totalAmt <= 0) return null;
+  if(totalAmt === 0) return null;
   var threshold = (e.group === 'RP') ? 0.5 : 0.005;
-  if(allocSum >= totalAmt - threshold) return null;  // Fully allocated
+  var rem;
+  if(totalAmt > 0){
+    if(allocSum >= totalAmt - threshold) return null;  // fully (or over) allocated → not a carry
+    rem = totalAmt - allocSum;                          // positive remainder
+  } else {
+    // Advanced payment / overpay: carry the NEGATIVE balance until it's settled (~0).
+    rem = totalAmt - allocSum;                          // negative
+    if(Math.abs(rem) <= threshold) return null;
+  }
   return {
     totalAmt: totalAmt,
     allocSum: allocSum,
-    remaining: Math.max(0, totalAmt - allocSum),
+    remaining: rem,
     isSGDPending: false,
+    isAdvance: totalAmt < 0,
     currency: e.currency || (e.group === 'RP' ? 'IDR' : e.group === 'THB' ? 'THB' : 'RM')
   };
 }
@@ -5148,6 +5293,57 @@ function confirmCD(){
   }
 }
 
+// AUTO carry-in: bring every outstanding C/D candidate (incl. negative overpay/advance)
+// into today's table automatically so nothing is ever missed. Idempotent via the
+// consumed-set (carried rows have cdSource) + a once-per-day guard. Runs only on today.
+function _autoCarryCD(force){
+  try {
+    var todayName = _todayDateStr();
+    // Only when working on TODAY (never while editing a past day / viewing history).
+    if(currentChartName && currentChartName.trim() !== todayName) return;
+    var todayKey = new Date().toISOString().slice(0,10);
+    var acDate = localStorage.getItem('mg_autocarry_date') || '';
+    if(acDate === todayKey && !force) return;     // already auto-carried today
+    // Clean-start gate: only carry forward sources dated on/after the CD start day, so the
+    // messy pre-start history is never pulled in.
+    var startKey = (typeof _cdStartKey==='function') ? _cdStartKey() : '1970-01-01';
+    var items = (typeof _cdBuildItems === 'function') ? _cdBuildItems(null) : [];
+    items = items.filter(function(it){ var dk=''; try{ dk=new Date(it.chartDate).toISOString().slice(0,10); }catch(_){}; return dk && dk>=startKey; });
+    localStorage.setItem('mg_autocarry_date', todayKey);   // mark done even if 0 (don't retry all day)
+    if(!items.length) return;
+    var added = items.map(function(it, iIdx){
+      var src = it.entry, info = it.info;
+      var srcDateLabel = '';
+      try { srcDateLabel = new Date(it.chartDate).toLocaleDateString('en-MY',{day:'numeric',month:'numeric'}); }
+      catch(_){ srcDateLabel = new Date(Date.now()-86400000).toLocaleDateString('en-MY',{day:'numeric',month:'numeric'}); }
+      var baseName = (src.name||'').replace(/\s*\[C\/D fr [^\]]+\]/g,'').trim();
+      var ne = {
+        _id: (typeof _genId==='function'? _genId() : ('e'+Date.now()+'_'+iIdx+'_'+Math.random().toString(36).slice(2,5))),
+        updatedAt: Date.now(),
+        name: baseName + ' [C/D fr ' + srcDateLabel + ']',
+        bank: src.bank, account: src.account, group: src.group, owner: src.owner || '',
+        currency: src.currency || (src.group==='RP'?'IDR':src.group==='THB'?'THB':'RM'),
+        amount: info.remaining, isCD: true, cdLive: true,
+        cdSource: { id: src._id || null, sig: _cdSig(src), chartId: it.chartId, date: it.chartDate },
+        act:0, yes:0, hs:0, cash:0, btHeng:0
+      };
+      if(ne.currency === 'SGD'){ ne.rmAmount = 0; ne.sgdPending = true; ne.sgdAmount = info.remaining; }
+      else if(ne.group === 'RP'){ ne.rmAmount = 0; }
+      else if(ne.group === 'THB'){ ne.rmAmount = (rates.thb||0)>0 ? parseFloat((ne.amount*rates.thb).toFixed(2)) : 0; }
+      else { ne.rmAmount = ne.amount; }
+      return ne;
+    });
+    if(!added.length) return;
+    if(typeof pushUndo === 'function') pushUndo();
+    added.forEach(function(ne){ entries.push(ne); });
+    if(typeof _logOp === 'function') _logOp('cd_auto', '自动带入 '+added.length+' 条 C/D', { snap: entries.slice(0, entries.length-added.length) });
+    saveEntries();                 // per-op persist into today's chart
+    if(typeof renderAll === 'function') renderAll();
+    if(typeof updateCDBadge === 'function') updateCDBadge();
+    if(typeof _showSuccessToast === 'function') _showSuccessToast('已自动带入 '+added.length+' 笔 C/D，请核对');
+  } catch(e){ console.warn('_autoCarryCD failed:', e); }
+}
+
 // ── C/D reconciliation: compare each carried entry against its source's remaining ──
 function _fmtByGroup(group, currency, amt){
   if(currency==='SGD') return 'SGD '+fmtN(amt);
@@ -5178,6 +5374,84 @@ function _cdFindSource(cdSource){
     });
   }
   return hit;
+}
+
+// ── LIVE C/D — keep a carried entry and its source(s) consistent across the whole chain ──
+// Clean-start gate: the live system only acts on charts dated on/after this day, so the
+// existing messy history is never auto-carried or rewritten.
+function _cdStartKey(){
+  var k = localStorage.getItem('mg_cd_live_start');
+  if(!k){ k = new Date().toISOString().slice(0,10); localStorage.setItem('mg_cd_live_start', k); }
+  return k;
+}
+function _cdChartDateKey(ch){ try{ return new Date(ch.date).toISOString().slice(0,10); }catch(_){ return ''; } }
+// Group-aware sum of a row's allocations.
+function _cdAllocSum(e){
+  if(!e) return 0;
+  return e.group==='RP' ? ((e.btHeng||0)+(e.yes||0)+(e.hs||0)+(e.cash||0))
+                        : ((e.act||0)+(e.yes||0)+(e.hs||0)+(e.cash||0));
+}
+// Recompute rmAmount for a row using the rates that apply to it (chart's own rates for a
+// historical row; today's global rates for a live row).
+function _cdRecalcRm(e, ratesObj){
+  if(!e) return;
+  if(e.currency==='SGD' || e.sgdPending){ e.rmAmount=0; return; }
+  if(e.group==='RP'){ e.rmAmount=0; }
+  else if(e.group==='THB'){ var tr=(ratesObj&&ratesObj.thb>0)?ratesObj.thb:0; e.rmAmount = tr>0 ? parseFloat(((e.amount||0)*tr).toFixed(2)) : (e.rmAmount||0); }
+  else { e.rmAmount = (e.amount||0); }
+}
+// Reverse link: find the entry that was carried FROM `node` (its descendant). Searches
+// today's live entries first, then the saved charts. Returns {entry, where:'live'|chart}.
+function _cdFindCarrier(node){
+  if(!node) return null;
+  var nid=node._id, nsig=(typeof _cdSig==='function')?_cdSig(node):'';
+  function match(e){ return e && e.cdSource && ((nid && e.cdSource.id===nid) || (e.cdSource.sig && nsig && e.cdSource.sig===nsig)); }
+  for(var i=0;i<entries.length;i++){ if(match(entries[i]) && entries[i]!==node) return {entry:entries[i], where:'live'}; }
+  var charts=JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
+  for(var c=0;c<charts.length;c++){ var ch=charts[c]; if(!ch||!Array.isArray(ch.entries)) continue; for(var j=0;j<ch.entries.length;j++){ if(match(ch.entries[j])) return {entry:ch.entries[j], where:ch}; } }
+  return null;
+}
+// Restore the chain invariant  C.amount == S.amount - allocSum(S)  outward from `pivot`
+// (the edited row is the truth): ancestors align to pivot.amount, descendants to pivot.remaining.
+function _cdSyncChain(pivot){
+  try{
+    if(!pivot) return;
+    var start=_cdStartKey();
+    var dirty={};        // chartId -> chart object to write back
+    var liveDirty=false;
+    var guard, visited;
+
+    // BACKWARD — align ancestors so each source's remaining == its child's amount.
+    guard=0; visited={}; var cur=pivot;
+    while(cur && cur.cdSource && guard++<60){
+      var f=_cdFindSource(cur.cdSource);
+      if(!f || !f.entry || !f.chart) break;
+      if(_cdChartDateKey(f.chart) < start) break;          // never rewrite pre-start history
+      var S=f.entry; if(visited[S._id]) break; visited[S._id]=1;
+      var want=(cur.amount||0)+_cdAllocSum(S);             // S.amount so that S.remaining == cur.amount
+      if((S.amount||0)!==want){ S.amount=want; _cdRecalcRm(S, f.chart.rates); S.updatedAt=Date.now(); dirty[f.chart.id]=f.chart; }
+      cur=S;
+    }
+    // FORWARD — align descendants so each carrier's amount == its parent's remaining.
+    guard=0; visited={}; cur=pivot;
+    while(cur && guard++<60){
+      var car=_cdFindCarrier(cur);
+      if(!car || !car.entry) break;
+      var D=car.entry; if(visited[D._id]) break; visited[D._id]=1;
+      var rem=(cur.amount||0)-_cdAllocSum(cur);
+      if((D.amount||0)!==rem){ D.amount=rem; _cdRecalcRm(D, car.where==='live'?rates:car.where.rates); D.updatedAt=Date.now(); if(car.where==='live') liveDirty=true; else dirty[car.where.id]=car.where; }
+      cur=D;
+    }
+
+    var ids=Object.keys(dirty);
+    if(ids.length){
+      var charts=JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
+      ids.forEach(function(cid){ var idx=charts.findIndex(function(c){ return c && String(c.id)===String(cid); }); if(idx>=0) charts[idx]=dirty[cid]; });
+      safeSetItem(CHARTS_KEY, JSON.stringify(charts));
+      if(typeof _bumpAction==='function') _bumpAction();   // controlled history write — legit, not a ghost
+    }
+    if(liveDirty && typeof saveEntries==='function') saveEntries();
+  }catch(e){ console.warn('_cdSyncChain failed:', e); }
 }
 function cdCompareReport(){
   var body = document.getElementById('cd-compare-body');
@@ -5461,26 +5735,33 @@ function openHistory(){
 // Drive pulls / daily-rotation must NOT auto-apply entries or rotate the chart away,
 // so loading a chart always sticks on the first click.
 var _manualChartLoadAt = 0;
-function loadChart(id){
+// loadChart is now the EXPLICIT "edit this day" path (reached via editHistoryChart),
+// not casual viewing. `silent` skips the confirm (caller already confirmed).
+function loadChart(id, silent){
   // Look up by stable id (not array index) — see renderHistoryList note.
   const charts=JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
   const c=charts.find(function(x){ return String(x.id)===String(id); });
   if(!c) return;
-  if(!confirm(isEng?`Load "${c.name}"?`:`载入「${c.name}」？`)) return;
+  if(!silent && !confirm(isEng?`Load "${c.name}"?`:`载入「${c.name}」？`)) return;
   if(typeof _logOp==='function') _logOp('load', '载入图表「'+c.name+'」（替换当前 '+entries.length+' 条）', {snap: entries});
   _manualChartLoadAt = Date.now();
   pushUndo(); entries=JSON.parse(JSON.stringify(c.entries));
   if(typeof _clearTombstones==='function') _clearTombstones(entries.map(function(e){ return e._id; }));  // explicitly loaded = intended
+  if(typeof _bumpAction==='function') _bumpAction();   // explicit load = legitimate change
   // User manually loaded — mark this chart's date as active (prevents auto-rotation)
   if(c.date){
     localStorage.setItem('mg_last_active_chart_date', new Date(c.date).toISOString().slice(0,10));
   }
   if(c.rates){ rates = _backfillRawRates({...c.rates}); populateRateInputs(); updateRatesTodayLabel(); }
-  currentChartId=c.id; currentChartName=c.name;
+  _setCurrentChart(c.id, c.name);
   // Update Save button to show current chart name
   var sb=document.getElementById('btn-save');
   if(sb) sb.title='Save: '+c.name;
-  saveEntries(); closeModal('modal-history'); renderAll();
+  safeSetItem(ENTRIES_KEY, JSON.stringify(entries));
+  localStorage.setItem('mg_last_write', Date.now().toString());
+  closeModal('modal-history'); closeModal('modal-cust-hist');
+  if(typeof _updateEditingBanner==='function') _updateEditingBanner();
+  renderAll();
 }
 function deleteChart(id){
   const charts=JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
@@ -7192,6 +7473,7 @@ function _ensureEntryIds(){
 }
 
 function _checkDailyChartRotation(){
+  if(typeof _bumpAction==='function') _bumpAction();   // rotation is a legitimate system action
   var todayName = _todayDateStr();
   var todayKey = new Date().toISOString().slice(0,10);
   var lastActiveDate = localStorage.getItem('mg_last_active_chart_date') || '';
@@ -7224,8 +7506,7 @@ function _checkDailyChartRotation(){
     var existingCharts2 = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
     var todayCh = existingCharts2.find(function(c){ return c.name && c.name.trim() === todayName; });
     if(todayCh){
-      currentChartId = todayCh.id;
-      currentChartName = todayCh.name.trim();
+      _setCurrentChart(todayCh.id, todayCh.name.trim());
       if(!entries || entries.length === 0){
         // Live entries empty — safe to adopt the chart's entries (recovery).
         entries = JSON.parse(JSON.stringify(todayCh.entries||[]));
@@ -7257,8 +7538,7 @@ function _checkDailyChartRotation(){
     localStorage.setItem('mg_last_active_chart_date', todayKey);
     if(!entries || entries.length === 0){
       // Create empty today chart
-      currentChartId = Date.now();
-      currentChartName = todayName;
+      _setCurrentChart(Date.now(), todayName);
       var firstChart = {
         id: currentChartId,
         name: todayName,
@@ -7315,15 +7595,13 @@ function _checkDailyChartRotation(){
   if(todayChart){
     // Today's chart exists in history — load it
     entries = JSON.parse(JSON.stringify(todayChart.entries||[]));
-    currentChartId = todayChart.id;
-    currentChartName = todayChart.name.trim();
+    _setCurrentChart(todayChart.id, todayChart.name.trim());
     safeSetItem(ENTRIES_KEY, JSON.stringify(entries));
     if(typeof markSaved === 'function') markSaved();
   } else {
     // Auto-create today's chart with today's date as name (so it appears in history immediately)
     entries = [];
-    currentChartId = Date.now();
-    currentChartName = todayName;
+    _setCurrentChart(Date.now(), todayName);
     safeSetItem(ENTRIES_KEY, '[]');
     // Add the empty chart to history so it shows up
     var newTodayChart = {
@@ -7362,6 +7640,8 @@ function _checkDailyChartRotation(){
   localStorage.setItem('mg_last_save_date', todayKey);
 
   if(typeof renderAll === 'function') renderAll();
+  // New today chart is ready → auto-carry all outstanding C/D so nothing is missed.
+  if(typeof _autoCarryCD === 'function') setTimeout(function(){ _autoCarryCD(); }, 300);
 }
 
 // Show one-time toast each day reminding user to enter today's rates
@@ -8798,6 +9078,7 @@ function batchDelete(){
   if(typeof _logOp==='function') _logOp('batch_delete', '批量删除 '+_batchSelected.size+' 条', {snap: entries});
   pushUndo();
   var _delIds = Array.from(_batchSelected);
+  try { localStorage.setItem('mg_lastdel', JSON.stringify({ at:Date.now(), ids:_delIds })); } catch(e){}  // R10 intent
   entries = entries.filter(function(e){ return !_batchSelected.has(e._id); });
   _addTombstones(_delIds);   // deletions stick across devices
   _batchSelected.clear();
@@ -8984,7 +9265,7 @@ function renderHistoryList(charts){
         '<div class="hist-name">'+c.name+'</div>' +
         '<div class="hist-meta">'+new Date(c.date).toLocaleString('en-MY')+' · '+c.entries.length+' entries · RM '+fmtN(gRM)+'</div>' +
       '</div>' +
-      '<button class="tb-btn teal" onclick="loadChart(\''+cid+'\')">'+t('history_load')+'</button>' +
+      '<button class="tb-btn teal" onclick="viewChartReadonly(\''+cid+'\')">📖 '+(isEng?'View':'查看')+'</button>' +
       '<button class="tb-btn" onclick="viewChartCustomers(\''+cid+'\')" style="color:var(--pbb);border-color:rgba(168,127,255,.3)" title="客户历史">👤</button>' +
       '<button class="tb-btn red" onclick="deleteChart(\''+cid+'\')">'+t('history_delete')+'</button>' +
     '</div>';
@@ -9023,6 +9304,110 @@ function viewChartCustomers(id){
   }
   closeModal('modal-history');
   document.getElementById('modal-cust-hist').classList.remove('hidden');
+}
+
+// ─────────── READ-ONLY HISTORY VIEW ───────────
+// Viewing a past day is now NON-DESTRUCTIVE: it renders that chart in a read-only
+// modal and NEVER touches the live `entries` (today). This removes the root cause of
+// the "today overwritten by yesterday" bug. Editing an old day is an explicit,
+// confirmed action (editHistoryChart) that the operator rarely needs.
+function viewChartReadonly(id){
+  var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
+  var c = charts.find(function(x){ return String(x.id)===String(id); });
+  if(!c) return;
+  var title = document.getElementById('cust-hist-title');
+  var body  = document.getElementById('cust-hist-body');
+  if(title) title.textContent = '📖 ' + (isEng?'Viewing (read-only): ':'查看历史(只读)：') + c.name;
+  var html =
+    '<div style="background:rgba(0,200,240,.12);border:1.5px solid rgba(0,200,240,.4);border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:14px;color:var(--text)">'+
+      '📖 <b>'+(isEng?'Read-only — this does NOT affect today.':'只读查看 — 不会影响今日数据。')+'</b></div>'+
+    '<div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">'+
+      '<button onclick="closeModal(\'modal-cust-hist\')" style="min-height:48px;padding:0 16px;border-radius:10px;border:none;background:var(--green);color:#fff;font-size:15px;font-weight:700;cursor:pointer">← '+(isEng?'Back to today':'返回今日')+'</button>'+
+      '<button onclick="cdCompareReport()" style="min-height:48px;padding:0 16px;border-radius:10px;border:1.5px solid var(--border2);background:var(--surface2);color:var(--text);font-size:14px;cursor:pointer">🔍 '+(isEng?'Check carry':'核对带入')+'</button>'+
+      '<button onclick="editHistoryChart(\''+String(c.id)+'\')" style="min-height:48px;padding:0 16px;border-radius:10px;border:1.5px solid var(--orange);background:transparent;color:var(--orange);font-size:14px;cursor:pointer">✏️ '+(isEng?'Edit this day':'编辑这一天')+'</button>'+
+    '</div>';
+  // Grouped read-only table
+  var groups = {};
+  (c.entries||[]).forEach(function(e){ (groups[e.group]=groups[e.group]||[]).push(e); });
+  BANK_GROUPS.forEach(function(group){
+    var list = groups[group]; if(!list||!list.length) return;
+    var isRP=group==='RP', isTHB=group==='THB';
+    var col1 = isRP?'BT':'ACT';
+    html += '<div style="font-weight:700;font-size:13px;color:var(--text2);margin:10px 0 4px">'+group+'</div>'+
+      '<table style="width:100%;border-collapse:collapse;font-size:13px">'+
+      '<thead><tr style="background:var(--surface2)">'+
+        '<th style="padding:6px 8px;text-align:left">客户</th>'+
+        '<th style="padding:6px 8px;text-align:right">金额</th>'+
+        '<th style="padding:6px 8px;text-align:right">'+col1+'</th>'+
+        '<th style="padding:6px 8px;text-align:right">YES</th>'+
+        '<th style="padding:6px 8px;text-align:right">HS</th>'+
+        '<th style="padding:6px 8px;text-align:right">CASH</th>'+
+      '</tr></thead><tbody>'+
+      list.map(function(e){
+        var amt = _fmtByGroup(e.group, e.currency, e.amount||0);
+        var neg = (e.amount||0) < 0;
+        return '<tr style="border-bottom:1px solid var(--border)'+(neg?';background:rgba(255,61,82,.10)':'')+'">'+
+          '<td style="padding:5px 8px">'+(e.name||'')+(neg?' <span style="color:var(--red);font-weight:700;font-size:10px">超付</span>':'')+'</td>'+
+          '<td style="padding:5px 8px;text-align:right;font-family:monospace'+(neg?';color:var(--red)':'')+'">'+amt+'</td>'+
+          '<td style="padding:5px 8px;text-align:right;font-family:monospace">'+fmtN(isRP?(e.btHeng||0):(e.act||0))+'</td>'+
+          '<td style="padding:5px 8px;text-align:right;font-family:monospace">'+fmtN(e.yes||0)+'</td>'+
+          '<td style="padding:5px 8px;text-align:right;font-family:monospace">'+fmtN(e.hs||0)+'</td>'+
+          '<td style="padding:5px 8px;text-align:right;font-family:monospace">'+fmtN(e.cash||0)+'</td>'+
+        '</tr>';
+      }).join('')+'</tbody></table>';
+  });
+  if(body) body.innerHTML = html;
+  closeModal('modal-history');
+  document.getElementById('modal-cust-hist').classList.remove('hidden');
+}
+
+// Explicit, confirmed edit of a past day. Loads it into the working set (binding moves
+// to that chart; per-op save persists back to THAT chart). A banner offers Return-to-today.
+function editHistoryChart(id){
+  if(!confirm(isEng?'Edit this past day? Today\'s data is safely saved and untouched. Remember to tap "Return to today" when done.'
+                   :'要编辑历史这一天吗？今日数据已安全保存、不受影响。改完记得点「返回今日」。')) return;
+  closeModal('modal-cust-hist');
+  loadChart(id, true);   // true = silent (already confirmed)
+}
+
+// Reload today's chart into the working set (used after editing a past day).
+function returnToToday(){
+  var todayName = _todayDateStr();
+  var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
+  var tc = charts.find(function(c){ return c.name && c.name.trim()===todayName; });
+  if(tc){
+    entries = JSON.parse(JSON.stringify(tc.entries||[]));
+    _setCurrentChart(tc.id, tc.name);
+    if(tc.rates) { rates = _backfillRawRates({...tc.rates}); populateRateInputs(); }
+  } else {
+    entries = [];
+    _setCurrentChart(Date.now(), todayName);
+  }
+  safeSetItem(ENTRIES_KEY, JSON.stringify(entries));
+  if(typeof _bumpAction==='function') _bumpAction();   // return-to-today = legitimate change
+  localStorage.setItem('mg_last_active_chart_date', new Date().toISOString().slice(0,10));
+  if(typeof _clearTombstones==='function') _clearTombstones(entries.map(function(e){return e._id;}));
+  _updateEditingBanner();
+  renderAll();
+}
+
+// Show a fixed banner whenever the working set is NOT today (i.e. editing a past day).
+function _updateEditingBanner(){
+  var existing = document.getElementById('editing-history-banner');
+  var todayName = _todayDateStr();
+  var editing = currentChartName && currentChartName.trim() !== todayName;
+  if(editing){
+    if(!existing){
+      existing = document.createElement('div');
+      existing.id = 'editing-history-banner';
+      existing.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9000;background:var(--orange);color:#fff;padding:10px 14px;font-size:15px;font-weight:700;display:flex;align-items:center;justify-content:center;gap:14px;box-shadow:0 2px 10px rgba(0,0,0,.4)';
+      document.body.appendChild(existing);
+    }
+    existing.innerHTML = '✏️ 正在编辑历史：'+currentChartName+
+      ' <button onclick="returnToToday()" style="min-height:40px;padding:0 16px;border-radius:8px;border:none;background:#fff;color:var(--orange);font-size:14px;font-weight:700;cursor:pointer">← 返回今日</button>';
+  } else if(existing){
+    existing.remove();
+  }
 }
 
 // ─────────── CUSTOMER HISTORY (rewritten — robust, simple) ───────────
@@ -9218,10 +9603,19 @@ function init(){
   setFontSize(_fontSize);
   if(typeof _ensureEntryIds === 'function') _ensureEntryIds();  // stable _id before any sync/merge
   if(typeof _seedBankGroupMapFromCustomers === 'function') _seedBankGroupMapFromCustomers();
+  // Restore the persisted chart binding so a reload knows EXACTLY which chart `entries`
+  // belongs to (instead of guessing). Rotation then only handles a real day change.
+  (function(){
+    var sName = localStorage.getItem('mg_current_chart_name');
+    var sId   = localStorage.getItem('mg_current_chart_id');
+    if(sName) currentChartName = sName;
+    if(sId)   currentChartId   = sId;
+  })();
   renderAll();
   if(typeof updateCDBadge === 'function') updateCDBadge();  // show pending C/D count on load
   applySimpleMode();
   _setupSimpleToggleLongPress();
+  _setupQaTapGuard();
   _setupAutoSaveTriggers();
   _setupAggressiveTokenRefresh();
   _setupOfflineDetection();
@@ -9231,6 +9625,7 @@ function init(){
   setTimeout(function(){
     checkLoginRequiredOverlay();
     _checkDailyChartRotation();
+    if(typeof _autoCarryCD === 'function') setTimeout(function(){ _autoCarryCD(); }, 700);  // auto-bring outstanding C/D (once/day)
     _checkDailyExcelBackup();
     _checkDailyRatesReminder();
     _syncStatusSelfCorrect();
@@ -9460,6 +9855,240 @@ function MGApplyFix(id, patch){
   setTimeout(tick, 2500);
   setInterval(tick, 10000);
   window.addEventListener('storage', function(){ setTimeout(tick, 200); });
+});  /* MGAudit v1 DEFINED BUT NOT INVOKED — superseded by the independent MGAudit v2 script below */
+</script>
+<script charset="utf-8">
+/* ============================================================================
+ * MGAudit v2 — FULLY INDEPENDENT watchdog, in its OWN <script> so it keeps
+ * running and alerting even if the main app script throws at load. It reads only
+ * localStorage; the only writes are its own log/baseline + (for clear "ghost"
+ * anomalies) an auto-repair that ALWAYS backs up the pre-repair state first.
+ * Watches illogical BEHAVIOUR via a 2s snapshot + an action counter (mg_action_seq),
+ * classifies findings low/med/high, and raises a tiered alert immediately.
+ * ============================================================================ */
+(function MGAuditV2(){
+  'use strict';
+  var LOG='mg_audit_log', LG='mg_audit_lastgood', BK='mg_overwrite_backups';
+  function gj(k,d){ try{var v=localStorage.getItem(k);return v==null?d:JSON.parse(v);}catch(e){return d;} }
+  function sset(k,v){ try{ localStorage.setItem(k, typeof v==='string'?v:JSON.stringify(v)); return true;}catch(e){return false;} }
+  function isNum(x){ return typeof x==='number'&&isFinite(x); }
+  function round(v,dp){ var f=Math.pow(10,dp); return Math.round((v+Number.EPSILON)*f)/f; }
+  function seq(){ return parseInt(localStorage.getItem('mg_action_seq')||'0'); }
+  function tomb(){ return gj('mg_tombstones',{})||{}; }
+  function fmtMoney(cur,v){ if(cur==='IDR') return 'IDR '+Math.round(v).toLocaleString(); return (cur||'RM')+' '+round(v,2).toFixed(2); }
+
+  var snap=null;        // in-memory baseline: {seq,ids,fields,rates}
+  var cardOpen=false;
+
+  function log(sev,code,msg){ try{var l=gj(LOG,[]); l.unshift({ts:Date.now(),sev:sev,code:code,msg:msg}); if(l.length>200)l=l.slice(0,200); sset(LOG,l);}catch(e){} }
+  function backup(reason){ try{var p=gj(BK,[]); p.unshift({ts:Date.now(),replacedAt:new Date().toISOString(),original:{id:'audit_'+Date.now(),name:'监管自动备份（'+reason+'）',date:new Date().toISOString(),entries:gj('mg_entries',[]),charts:gj('mg_charts',[])}}); if(p.length>14)p=p.slice(0,14); sset(BK,p);}catch(e){} }
+  // The ONLY business-data write: an auto-repair. Backs up first, then re-syncs the app.
+  function writeEntries(arr,reason){ backup(reason); sset('mg_entries',arr); try{localStorage.setItem('mg_last_write',String(Date.now()));}catch(e){} try{localStorage.setItem('mg_action_seq',String(seq()+1));}catch(e){} if(typeof window.MGReloadEntries==='function') window.MGReloadEntries(); snap=null; }
+
+  function buildSnap(entries){
+    var ids={},fields={};
+    (entries||[]).forEach(function(e){ if(e&&e._id){ ids[e._id]=1; fields[e._id]={a:e.amount,c1:e.act,y:e.yes,h:e.hs,ca:e.cash,b:e.btHeng}; } });
+    return { seq:seq(), ids:ids, fields:fields, rates:JSON.stringify(gj('mg_rates',{})) };
+  }
+  function rebaseline(entries,rates){ snap=buildSnap(entries); sset(LG,{entries:entries,rates:JSON.stringify(rates||{}),at:Date.now()}); }
+
+  // ---------------- the scan: returns findings, decides repairs ----------------
+  function scan(){
+    var F=[];
+    var rates=gj('mg_rates',{});
+    var now=Date.now(), curSeq=seq();
+    var oplog=gj('mg_oplog',[])||[];
+    function recentOp(types,since){ return oplog.some(function(o){ return o&&types.indexOf(o.type)>=0 && (now-(o.ts||0))<since; }); }
+
+    // R8 structural (high) — distinguish "key present but CORRUPT" from "absent".
+    var rawE=localStorage.getItem('mg_entries'), rawC=localStorage.getItem('mg_charts');
+    var entries=null, charts=null;
+    if(rawE!=null){ try{ entries=JSON.parse(rawE); }catch(e){ F.push({sev:'high',code:'struct',card:true,msg:'今日记录存储损坏，请联系老板'}); return F; } }
+    if(rawC!=null){ try{ charts=JSON.parse(rawC); }catch(e){ F.push({sev:'high',code:'struct2',card:true,msg:'表格存储损坏，请联系老板'}); } }
+    if(entries!==null && !Array.isArray(entries)){ F.push({sev:'high',code:'struct',card:true,msg:'今日记录存储损坏，请联系老板'}); return F; }
+    if(charts!==null && !Array.isArray(charts)){ F.push({sev:'high',code:'struct2',card:true,msg:'表格存储损坏，请联系老板'}); charts=null; }
+    if(!Array.isArray(entries)) return F;
+
+    // ===== behaviour conservation (ghosts) — only when NO legitimate action happened =====
+    if(snap && curSeq===snap.seq){
+      var cur=buildSnap(entries);
+      var added=[],removed=[];
+      Object.keys(cur.ids).forEach(function(id){ if(!snap.ids[id]) added.push(id); });
+      Object.keys(snap.ids).forEach(function(id){ if(!cur.ids[id]) removed.push(id); });
+      var lg=gj(LG,null);
+      if(added.length||removed.length){
+        F.push({sev:'high',code:'ghost_member',auto:true,msg:'已自动拦下一次幽灵客户变动（无操作下 +'+added.length+' / -'+removed.length+'）',
+          repair:function(){ if(lg&&Array.isArray(lg.entries)) writeEntries(lg.entries,'幽灵客户'); }});
+      } else {
+        var fieldGhost=false;
+        Object.keys(cur.fields).forEach(function(id){ var a=cur.fields[id],b=snap.fields[id]; if(!b)return; ['a','c1','y','h','ca','b'].forEach(function(k){ if((a[k]||0)!==(b[k]||0)) fieldGhost=true; }); });
+        if(fieldGhost){
+          F.push({sev:'high',code:'ghost_field',auto:true,msg:'已自动拦下一次幽灵金额/分配变动（无操作下数值自己变）',
+            repair:function(){ if(lg&&Array.isArray(lg.entries)) writeEntries(lg.entries,'幽灵金额'); }});
+        } else if(cur.rates!==snap.rates && !recentOp(['sync_apply'],6000)){
+          F.push({sev:'med',code:'ghost_rate',auto:true,msg:'已自动还原一次幽灵汇率变动',
+            repair:function(){ if(lg&&lg.rates){ sset('mg_rates',lg.rates); } snap=null; }});
+        }
+      }
+    }
+
+    // ===== action-effect family (intent markers) =====
+    var la=gj('mg_lastadd',null);
+    if(la&&la.entry&&la.entry._id&&(now-(la.at||0))<8000){
+      var present=entries.some(function(e){return e&&e._id===la.entry._id;});
+      if(!present&&(now-(la.at||0))>1500){
+        F.push({sev:'high',code:'lost_add',auto:true,msg:'刚录入的「'+(la.entry.name||'')+'」没成功加入，已自动补回',
+          repair:function(){ var arr=gj('mg_entries',[])||[]; if(!arr.some(function(e){return e&&e._id===la.entry._id;})){ arr.push(la.entry); writeEntries(arr,'录入丢失补回'); } try{localStorage.removeItem('mg_lastadd');}catch(e){} }});
+      } else if(present){ try{localStorage.removeItem('mg_lastadd');}catch(e){} }
+    }
+    var ld=gj('mg_lastdel',null);
+    if(ld&&ld.ids&&ld.ids.length&&(now-(ld.at||0))<8000&&(now-(ld.at||0))>1500){
+      var still=entries.filter(function(e){return e&&ld.ids.indexOf(e._id)>=0;});
+      if(still.length){
+        F.push({sev:'high',code:'lost_del',auto:true,msg:'刚删除的 '+still.length+' 笔还在，已重新删除',
+          repair:function(){ var arr=(gj('mg_entries',[])||[]).filter(function(e){return !(e&&ld.ids.indexOf(e._id)>=0);}); writeEntries(arr,'删除没生效重删'); try{localStorage.removeItem('mg_lastdel');}catch(e){} }});
+      } else { try{localStorage.removeItem('mg_lastdel');}catch(e){} }
+    }
+    var sf=parseInt(localStorage.getItem('mg_save_failed')||'0');
+    if(sf&&(now-sf)<8000){ F.push({sev:'high',code:'save_failed',card:true,msg:'存储满了，刚才的改动可能没保存！请到「数据恢复」清理旧备份后重试。'}); try{localStorage.removeItem('mg_save_failed');}catch(e){} }
+
+    // ===== content rules =====
+    var tb=tomb();
+    var res=entries.filter(function(e){return e&&e._id&&tb[e._id]&&!(e.updatedAt&&e.updatedAt>tb[e._id]);});
+    if(res.length){ F.push({sev:'high',code:'resurrect',auto:true,msg:'删除的客户又出现（'+res.length+' 笔），已自动移除',
+      repair:function(){ var arr=(gj('mg_entries',[])||[]).filter(function(e){return !(e&&e._id&&tb[e._id]&&!(e.updatedAt&&e.updatedAt>tb[e._id]));}); writeEntries(arr,'删除复活清除'); }}); }
+
+    entries.forEach(function(e){
+      if(!e||!e.conv||e.amountUserEdited) return;
+      var c=e.conv; if(!(isNum(c.sgd)&&c.sgd>0&&isNum(c.mult)&&c.mult>0)) return;
+      var dp=c.target==='IDR'?0:2, tol=c.target==='IDR'?0.5:0.005, exp=round(c.sgd*c.mult,dp);
+      if(!isNum(e.amount)||Math.abs(e.amount-exp)>tol){
+        var patch={amount:exp,amountUserEdited:false};
+        if(c.target==='RM')patch.rmAmount=exp; else if(c.target==='IDR')patch.rmAmount=0; else if(c.target==='THB')patch.rmAmount=isNum(c.thb)&&c.thb>0?round(exp*c.thb,2):(e.rmAmount||0);
+        F.push({sev:'med',code:'conv:'+e._id,msg:'换算金额要核对：'+(e.name||''),
+          card:{title:'这笔换算好像不对',body:'<b>'+(e.name||'')+'</b><br>新币 SGD '+round(c.sgd,2).toFixed(2)+' 应换成 <b style="color:var(--green)">'+fmtMoney(c.target,exp)+'</b>，但现在是 <b style="color:var(--red)">'+fmtMoney(e.currency||c.target,e.amount)+'</b>。',
+            yes:'改成 '+fmtMoney(c.target,exp), no:'保持现在（我自己改过）',
+            onYes:function(){ if(typeof window.MGApplyFix==='function') window.MGApplyFix(e._id,patch); },
+            onNo:function(){ if(typeof window.MGApplyFix==='function') window.MGApplyFix(e._id,{amountUserEdited:true}); }}});
+      }
+    });
+    var seen={};
+    entries.forEach(function(e){ if(!e)return; if(!e._id){F.push({sev:'med',code:'noid',msg:'有记录缺少ID'});} else { if(seen[e._id])F.push({sev:'med',code:'dupid:'+e._id,msg:'有重复ID的记录'}); seen[e._id]=1; } });
+    entries.forEach(function(e){ if(!e||e.sgdPending||e.currency==='SGD')return;
+      if(e.group==='RP'){ if((e.rmAmount||0)!==0) F.push({sev:'med',code:'rm:'+e._id,msg:'RP金额不一致：'+(e.name||'')}); }
+      else if(e.group==='THB'){ if(rates&&rates.thb>0){ var ex=round((e.amount||0)*rates.thb,2); if(Math.abs((e.rmAmount||0)-ex)>0.05) F.push({sev:'med',code:'rm:'+e._id,msg:'THB金额不一致：'+(e.name||'')}); } }
+      else { if((e.amount||0)!==0 && Math.abs((e.rmAmount||0)-(e.amount||0))>0.005) F.push({sev:'med',code:'rm:'+e._id,msg:'金额不一致：'+(e.name||'')}); }
+    });
+    var cnt={};
+    entries.forEach(function(e){ if(!e||e.hidden)return; var k=(e.name||'')+'|'+(e.account||'')+'|'+(e.owner||'')+'|'+(e.group||'')+'|'+(e.amount||0); cnt[k]=(cnt[k]||0)+1; });
+    Object.keys(cnt).forEach(function(k){ if(cnt[k]>=2) F.push({sev:'low',code:'dup:'+k,msg:'疑似重复录入：'+k.split('|')[0]}); });
+
+    // chart rules
+    if(Array.isArray(charts)){
+      var nc={}; charts.forEach(function(c){ if(c&&c.name){var k=String(c.name).trim(); nc[k]=(nc[k]||0)+1;} });
+      Object.keys(nc).forEach(function(k){ if(nc[k]>=2) F.push({sev:'med',code:'dupchart:'+k,msg:'有两张同一天（'+k+'）的表格'}); });
+    }
+    // R7 whole-wipe with no operation
+    if(snap && Object.keys(snap.ids).length>0 && entries.length===0 && !recentOp(['delete','batch_delete','clear','load','sync_apply'],30000)){
+      var lg2=gj(LG,null);
+      F.push({sev:'high',code:'wipe',auto:true,msg:'今日记录整盘清空（无任何删除/清空操作），已自动恢复',
+        repair:function(){ if(lg2&&Array.isArray(lg2.entries)&&lg2.entries.length) writeEntries(lg2.entries,'整盘清空恢复'); }});
+    }
+    return F;
+  }
+
+  // ---------------- UI ----------------
+  function setLight(level){
+    var el=document.getElementById('audit-light'); if(!el) return;
+    var m={ ok:['✓ 数据正常','rgba(0,212,144,.14)','var(--green)','rgba(0,212,144,.45)'],
+            low:['🟡 注意','rgba(255,201,60,.16)','var(--yellow)','rgba(255,201,60,.5)'],
+            med:['🟠 有问题，请看','rgba(255,159,28,.16)','var(--orange)','rgba(255,159,28,.55)'],
+            high:['🔴 严重问题','rgba(255,61,82,.18)','var(--red)','rgba(255,61,82,.6)'] }[level]||['✓ 数据正常','rgba(0,212,144,.14)','var(--green)','rgba(0,212,144,.45)'];
+    el.textContent=m[0]; el.style.background=m[1]; el.style.color=m[2]; el.style.borderColor=m[3];
+  }
+  function notice(msg){
+    var n=document.getElementById('mg-notice');
+    if(!n){ n=document.createElement('div'); n.id='mg-notice'; n.style.cssText='position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:10050;background:var(--green);color:#fff;padding:10px 16px;border-radius:10px;font-size:14px;font-weight:700;box-shadow:0 6px 24px rgba(0,0,0,.4);font-family:IBM Plex Sans,sans-serif;max-width:92vw'; document.body.appendChild(n); }
+    n.textContent='🛡 '+msg; n.style.opacity='1';
+    clearTimeout(n._t); n._t=setTimeout(function(){ n.style.transition='opacity .5s'; n.style.opacity='0'; }, 4500);
+  }
+  function renderBanner(med){
+    var b=document.getElementById('mg-banner');
+    var fixable=med.filter(function(f){return f.card;});
+    if(!med.length){ if(b) b.remove(); return; }
+    if(!b){ b=document.createElement('div'); b.id='mg-banner'; b.style.cssText='position:fixed;top:0;left:0;right:0;z-index:8800;background:var(--orange,#ff9f1c);color:#fff;padding:9px 14px;font-size:14px;font-weight:700;display:flex;align-items:center;justify-content:center;gap:12px;box-shadow:0 2px 10px rgba(0,0,0,.35);font-family:IBM Plex Sans,sans-serif'; document.body.appendChild(b); }
+    var txt='🟠 有 '+med.length+' 个中等问题：'+med[0].msg+(med.length>1?(' 等'):'');
+    b.innerHTML='<span>'+txt+'</span>'+(fixable.length?'<button id="mg-banner-fix" style="min-height:38px;padding:0 14px;border-radius:8px;border:none;background:#fff;color:var(--orange);font-size:13px;font-weight:700;cursor:pointer">处理</button>':'<button onclick="MGAuditOpen&&MGAuditOpen()" style="min-height:38px;padding:0 14px;border-radius:8px;border:none;background:#fff;color:var(--orange);font-size:13px;font-weight:700;cursor:pointer">查看</button>');
+    if(fixable.length){ var fb=document.getElementById('mg-banner-fix'); if(fb) fb.onclick=function(){ showCard(fixable[0].card); }; }
+  }
+  function busy(){ if(document.querySelector('.modal-overlay:not(.hidden)')) return true; var ae=document.activeElement; if(ae&&(ae.tagName==='INPUT'||ae.tagName==='SELECT'||ae.tagName==='TEXTAREA'))return true; return false; }
+  function closeCard(){ var c=document.getElementById('audit-card'); if(c)c.remove(); cardOpen=false; }
+  function showCard(card){
+    closeCard(); cardOpen=true;
+    var ov=document.createElement('div'); ov.id='audit-card';
+    ov.style.cssText='position:fixed;inset:0;z-index:10060;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;font-family:IBM Plex Sans,sans-serif';
+    var hasChoice=!!card.yes;
+    var inner='<div style="font-size:21px;font-weight:800;color:var(--red);margin-bottom:12px">⚠ '+(card.title||'需要你处理')+'</div>'+
+      '<div style="font-size:17px;line-height:1.6;color:var(--text)">'+(card.body||card.msg||'')+'</div>';
+    if(hasChoice){
+      inner+='<div style="display:flex;flex-direction:column;gap:12px;margin-top:22px">'+
+        '<button id="ac-yes" style="min-height:60px;border-radius:13px;border:none;background:var(--green);color:#fff;font-size:18px;font-weight:700;cursor:pointer">'+card.yes+'</button>'+
+        '<button id="ac-no" style="min-height:56px;border-radius:13px;border:2px solid var(--border2);background:var(--surface2);color:var(--text2);font-size:16px;font-weight:600;cursor:pointer">'+card.no+'</button></div>';
+    } else {
+      inner+='<div style="display:flex;margin-top:22px"><button id="ac-ok" style="flex:1;min-height:60px;border-radius:13px;border:none;background:var(--red);color:#fff;font-size:18px;font-weight:700;cursor:pointer">知道了</button></div>';
+    }
+    ov.innerHTML='<div style="background:var(--surface);border:3px solid var(--red);border-radius:18px;padding:26px;max-width:94vw;width:540px;box-shadow:0 16px 56px rgba(0,0,0,.7)">'+inner+'</div>';
+    document.body.appendChild(ov);
+    if(hasChoice){
+      document.getElementById('ac-yes').onclick=function(){ try{card.onYes&&card.onYes();}catch(e){} closeCard(); setTimeout(tick,100); };
+      document.getElementById('ac-no').onclick=function(){ try{card.onNo&&card.onNo();}catch(e){} closeCard(); setTimeout(tick,100); };
+    } else { document.getElementById('ac-ok').onclick=function(){ closeCard(); setTimeout(tick,100); }; }
+  }
+
+  // ---------------- main loop ----------------
+  function tick(){
+    var entries=gj('mg_entries',null), rates=gj('mg_rates',{}), curSeq=seq();
+    var F;
+    try { F=scan(); } catch(e){ return; }   // a scan error must never break the watchdog
+    // auto-repairs first (ghosts / resurrection / lost add-del / wipe)
+    var didRepair=false;
+    for(var i=0;i<F.length;i++){ if(F[i].repair){ try{ F[i].repair(); log(F[i].sev,F[i].code,F[i].msg); notice(F[i].msg); didRepair=true; }catch(e){} } }
+    if(didRepair){ setTimeout(tick,150); return; }   // re-baseline & re-scan after repair
+    // classify remaining (non-repair) findings
+    F.forEach(function(f){ log(f.sev,f.code,f.msg); });
+    var high=F.filter(function(f){return f.sev==='high';});
+    var med=F.filter(function(f){return f.sev==='med';});
+    var low=F.filter(function(f){return f.sev==='low';});
+    setLight(high.length?'high':med.length?'med':low.length?'low':'ok');
+    renderBanner(med);
+    var hc=high.filter(function(f){return f.card;})[0];
+    if(hc && !cardOpen && !busy()) showCard(hc.card||hc);
+    // maintain baseline: re-snapshot only after a legitimate action (seq moved) or first run
+    if(Array.isArray(entries)){
+      if(!snap || curSeq!==snap.seq) rebaseline(entries,rates);
+    }
+  }
+
+  window.MGAuditOpen=function(){
+    var F; try{ F=scan(); }catch(e){ F=[]; }
+    var by={high:[],med:[],low:[]}; F.forEach(function(f){ (by[f.sev]||by.low).push(f); });
+    var lg=gj(LOG,[])||[];
+    var html='<div style="font-family:IBM Plex Sans,sans-serif">';
+    function sec(title,arr,color){ if(!arr.length)return ''; return '<div style="font-weight:800;color:'+color+';margin:10px 0 6px;font-size:15px">'+title+'（'+arr.length+'）</div>'+arr.map(function(f){return '<div style="padding:8px 10px;border:1px solid var(--border);border-left:3px solid '+color+';border-radius:6px;margin-bottom:6px;font-size:14px">'+f.msg+(f.card&&f.card.yes?' <button onclick="event.stopPropagation()" style="display:none"></button>':'')+'</div>';}).join(''); }
+    if(!F.length) html+='<div style="padding:14px;border-radius:8px;background:rgba(0,212,144,.12);color:var(--green);font-weight:700;font-size:16px">✅ 一切正常，没有发现问题。</div>';
+    html+=sec('🔴 严重',by.high,'var(--red)')+sec('🟠 中等',by.med,'var(--orange)')+sec('🟡 不严重',by.low,'var(--yellow)');
+    html+='<div style="margin-top:14px;font-size:12px;color:var(--text3)">最近记录：</div>'+lg.slice(0,8).map(function(r){return '<div style="font-size:11px;color:var(--text3);font-family:monospace">'+new Date(r.ts).toLocaleTimeString('en-MY')+' ['+r.sev+'] '+r.msg+'</div>';}).join('');
+    html+='</div>';
+    var fixable=by.med.filter(function(f){return f.card;}).concat(by.high.filter(function(f){return f.card&&f.card.yes;}));
+    if(fixable.length){ showCard(fixable[0].card); return; }
+    var t=document.getElementById('cust-hist-title'); var b=document.getElementById('cust-hist-body');
+    if(t) t.textContent='🛡 数据安全检查'; if(b){ b.innerHTML=html; document.getElementById('modal-cust-hist').classList.remove('hidden'); }
+  };
+
+  // independent schedule: run on load, every 2s, and right after any storage write
+  setTimeout(tick, 1500);
+  setInterval(tick, 2000);
+  window.addEventListener('storage', function(){ setTimeout(tick, 150); });
 })();
 </script>
 </body>
