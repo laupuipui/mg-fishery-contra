@@ -1558,7 +1558,7 @@ function applySnapshot(data, applyEntries) {
       if(todayMatch && JSON.stringify(todayMatch.entries||[]) === JSON.stringify(entries)){
         currentChartId = todayMatch.id;
         currentChartName = todayMatch.name.trim();
-        localStorage.setItem('mg_last_active_chart_date', new Date().toISOString().slice(0,10));
+        localStorage.setItem('mg_last_active_chart_date', _dayKey());
       }
       // Do NOT link entries to historical charts here — rotation will move/clear stale entries
     }
@@ -1570,9 +1570,9 @@ function applySnapshot(data, applyEntries) {
   }
   // Only restore rates if Drive's rates are from today (don't overwrite daily-cleared rates)
   if (data.rates && data.rates.sgd) {
-    var todayKey = new Date().toISOString().slice(0,10);
+    var todayKey = _dayKey();                                   // LOCAL day
     var ratesDate = localStorage.getItem('mg_rates_date') || '';
-    var driveRatesDate = data.savedAt ? new Date(data.savedAt).toISOString().slice(0,10) : '';
+    var driveRatesDate = data.savedAt ? _dayKey(data.savedAt) : '';   // LOCAL day of Drive's save time
     // If Drive's rates were saved today, accept them; otherwise keep local (cleared) state
     if(driveRatesDate === todayKey){
       rates = _backfillRawRates(data.rates);
@@ -1898,8 +1898,8 @@ function pullFromDrive(cb, applyEntriesHint) {
             var localEmpty = !entries || entries.length === 0;
             var localWrite = parseInt(localStorage.getItem('mg_last_write')||'0');
             var driveWrite = data.savedAt ? new Date(data.savedAt).getTime() : 0;
-            var driveSavedDate = data.savedAt ? new Date(data.savedAt).toISOString().slice(0,10) : '';
-            var todayDateStr = new Date().toISOString().slice(0,10);
+            var driveSavedDate = data.savedAt ? _dayKey(data.savedAt) : '';
+            var todayDateStr = _dayKey();
             var driveIsFromToday = (driveSavedDate === todayDateStr);
             if(localEmpty && driveIsFromToday){
               shouldApplyEntries = true;  // fresh session today, Drive has today's work
@@ -2499,7 +2499,7 @@ let rates      = (function(){
   var saved = JSON.parse(localStorage.getItem(RATES_KEY)||'null');
   if(saved){
     var savedDate = localStorage.getItem('mg_rates_date')||'';
-    var today = new Date().toISOString().slice(0,10);
+    var today = _dayKey();   // LOCAL day — clears at local midnight, matching the chart day
     if(savedDate !== today){
       // New day — clear rates, keep defaults
       localStorage.removeItem(RATES_KEY);
@@ -3018,7 +3018,7 @@ function saveRatesSGD(){
   }
 
   safeSetItem(RATES_KEY, JSON.stringify(rates));
-  localStorage.setItem('mg_rates_date', new Date().toISOString().slice(0,10));
+  localStorage.setItem('mg_rates_date', _dayKey());   // LOCAL day, consistent with the clear check
   _saveRatesToTodayChart();   // bind the day's rate to today's chart (survives daily clear)
   _pushToDrive();
   updateRatesTodayLabel();
@@ -5301,14 +5301,14 @@ function _autoCarryCD(force){
     var todayName = _todayDateStr();
     // Only when working on TODAY (never while editing a past day / viewing history).
     if(currentChartName && currentChartName.trim() !== todayName) return;
-    var todayKey = new Date().toISOString().slice(0,10);
+    var todayKey = _dayKey();   // LOCAL business day
     var acDate = localStorage.getItem('mg_autocarry_date') || '';
     if(acDate === todayKey && !force) return;     // already auto-carried today
     // Clean-start gate: only carry forward sources dated on/after the CD start day, so the
     // messy pre-start history is never pulled in.
     var startKey = (typeof _cdStartKey==='function') ? _cdStartKey() : '1970-01-01';
     var items = (typeof _cdBuildItems === 'function') ? _cdBuildItems(null) : [];
-    items = items.filter(function(it){ var dk=''; try{ dk=new Date(it.chartDate).toISOString().slice(0,10); }catch(_){}; return dk && dk>=startKey; });
+    items = items.filter(function(it){ var dk=''; try{ dk=_dayKey(it.chartDate); }catch(_){}; return dk && dk>=startKey; });
     localStorage.setItem('mg_autocarry_date', todayKey);   // mark done even if 0 (don't retry all day)
     if(!items.length) return;
     var added = items.map(function(it, iIdx){
@@ -5351,7 +5351,7 @@ function _autoCarryCD(force){
 function _cdFixV1(){
   try {
     if(localStorage.getItem('mg_cd_fix_v1')) return;                 // already done on this device
-    var todayKey = new Date().toISOString().slice(0,10);
+    var todayKey = _dayKey();   // LOCAL business day
     if(todayKey > '2026-06-30'){ localStorage.setItem('mg_cd_fix_v1','expired'); return; }  // safety bound
     var todayName = _todayDateStr();
     var ent = JSON.parse(localStorage.getItem(ENTRIES_KEY)||'[]');
@@ -5381,7 +5381,7 @@ function _cdFixV1(){
     if(removedIds.length && typeof _addTombstones==='function') _addTombstones(removedIds);
 
     // 5) C/D starts TOMORROW; don't auto-carry again today
-    var tomorrow = new Date(Date.now()+86400000).toISOString().slice(0,10);
+    var tomorrow = _dayKey(Date.now()+86400000);   // LOCAL tomorrow
     localStorage.setItem('mg_cd_live_start', tomorrow);
     localStorage.setItem('mg_autocarry_date', todayKey);
     localStorage.setItem('mg_cd_fix_v1', new Date().toISOString());
@@ -5403,7 +5403,7 @@ function _cdFixV1(){
 function _freshStartV1(){
   try {
     if(localStorage.getItem('mg_fresh_start_v1')) return;
-    var todayKey = new Date().toISOString().slice(0,10);
+    var todayKey = _dayKey();   // LOCAL business day (so CD start = local today, excludes 22/6)
     if(todayKey > '2026-06-30'){ localStorage.setItem('mg_fresh_start_v1','expired'); return; }
     var tn = _todayDateStr();
     var ent = JSON.parse(localStorage.getItem(ENTRIES_KEY)||'[]');
@@ -5478,10 +5478,10 @@ function _cdFindSource(cdSource){
 // existing messy history is never auto-carried or rewritten.
 function _cdStartKey(){
   var k = localStorage.getItem('mg_cd_live_start');
-  if(!k){ k = new Date().toISOString().slice(0,10); localStorage.setItem('mg_cd_live_start', k); }
+  if(!k){ k = _dayKey(); localStorage.setItem('mg_cd_live_start', k); }
   return k;
 }
-function _cdChartDateKey(ch){ try{ return new Date(ch.date).toISOString().slice(0,10); }catch(_){ return ''; } }
+function _cdChartDateKey(ch){ try{ return _dayKey(ch.date); }catch(_){ return ''; } }
 // Group-aware sum of a row's allocations.
 function _cdAllocSum(e){
   if(!e) return 0;
@@ -5704,7 +5704,7 @@ function _doSaveChart(name, overwriteId){
   currentChartId = chartId;
   currentChartName = name.trim();
   // Track active chart's date for daily rotation
-  localStorage.setItem('mg_last_active_chart_date', new Date().toISOString().slice(0,10));
+  localStorage.setItem('mg_last_active_chart_date', _dayKey());
   if(typeof markSaved === 'function') markSaved();
   if(typeof _logOp === 'function') _logOp('save', '保存图表：'+trimName+'（'+entries.length+' 条）');
 
@@ -5753,7 +5753,7 @@ function saveChart(){
   var syncEl = document.getElementById('sync-status');
   var isOffline = syncEl && (syncEl.textContent.includes('离线') || syncEl.textContent.includes('登录') || syncEl.textContent.includes('错误'));
 
-  var todayStr = new Date().toISOString().slice(0,10);  // YYYY-MM-DD
+  var todayStr = _dayKey();  // YYYY-MM-DD
   var lastSaveDate = localStorage.getItem('mg_last_save_date') || '';
 
   // CRITICAL SAFETY CHECK: prevent silently overwriting a previous day's chart
@@ -5847,7 +5847,7 @@ function loadChart(id, silent){
   if(typeof _bumpAction==='function') _bumpAction();   // explicit load = legitimate change
   // User manually loaded — mark this chart's date as active (prevents auto-rotation)
   if(c.date){
-    localStorage.setItem('mg_last_active_chart_date', new Date(c.date).toISOString().slice(0,10));
+    localStorage.setItem('mg_last_active_chart_date', _dayKey(c.date));
   }
   if(c.rates){ rates = _backfillRawRates({...c.rates}); populateRateInputs(); updateRatesTodayLabel(); }
   _setCurrentChart(c.id, c.name);
@@ -7240,6 +7240,12 @@ function _setupOfflineDetection(){
 function _todayDateStr(){
   return new Date().toLocaleDateString('en-MY',{day:'numeric',month:'numeric',year:'numeric'});
 }
+// LOCAL calendar day key (YYYY-MM-DD). Use this for "today" comparisons instead of
+// toISOString() (which is UTC) — otherwise early-morning work in UTC+8 sees the wrong day.
+function _dayKey(dt){
+  var d = dt ? new Date(dt) : new Date();
+  return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2);
+}
 
 // ─── ONE-TIME CLEANUP: Remove all CD deletion markers from a previous buggy version ───
 // (The previous version marked items as deleted permanently when user IMPORTED a CD,
@@ -7572,7 +7578,7 @@ function _ensureEntryIds(){
 function _checkDailyChartRotation(){
   if(typeof _bumpAction==='function') _bumpAction();   // rotation is a legitimate system action
   var todayName = _todayDateStr();
-  var todayKey = new Date().toISOString().slice(0,10);
+  var todayKey = _dayKey();   // LOCAL day — consistent with todayName (also local)
   var lastActiveDate = localStorage.getItem('mg_last_active_chart_date') || '';
 
   // Determine if currently-loaded chart is today's
@@ -7722,13 +7728,12 @@ function _checkDailyChartRotation(){
     }, 400);
   }
 
-  // Also clear today's rates if they're from a previous day
-  // (rates daily-clear is handled by RATES_KEY initialization, but reinforce here)
+  // Also clear today's rates if they're from a previous day (LOCAL day, matches chart day)
   var ratesDate = localStorage.getItem('mg_rates_date') || '';
-  if(ratesDate !== todayKey){
+  if(ratesDate !== _dayKey()){
     rates = {sgd:null, thb:null, idr:null, sgdThb:null, sgdIdr:null};
     localStorage.removeItem(RATES_KEY);
-    localStorage.setItem('mg_rates_date', todayKey);
+    localStorage.setItem('mg_rates_date', _dayKey());
     if(typeof populateRateInputs === 'function') populateRateInputs();
     if(typeof updateRatesTodayLabel === 'function') updateRatesTodayLabel();
   }
@@ -7743,7 +7748,7 @@ function _checkDailyChartRotation(){
 
 // Show one-time toast each day reminding user to enter today's rates
 function _checkDailyRatesReminder(){
-  var todayStr = new Date().toISOString().slice(0,10);
+  var todayStr = _dayKey();
   var lastReminded = localStorage.getItem('mg_rates_reminded_date') || '';
   if(lastReminded === todayStr) return;
   // Check if any rate is missing
@@ -7784,7 +7789,7 @@ function _showRateReminderToast(){
 
 function _checkDailyExcelBackup(){
   var lastBackupDate = localStorage.getItem('mg_last_excel_backup_date') || '';
-  var todayStr = new Date().toISOString().slice(0,10);
+  var todayStr = _dayKey();
   if(lastBackupDate === todayStr) return;
   if(!entries || entries.length === 0) return;
 
@@ -9482,7 +9487,7 @@ function returnToToday(){
   }
   safeSetItem(ENTRIES_KEY, JSON.stringify(entries));
   if(typeof _bumpAction==='function') _bumpAction();   // return-to-today = legitimate change
-  localStorage.setItem('mg_last_active_chart_date', new Date().toISOString().slice(0,10));
+  localStorage.setItem('mg_last_active_chart_date', _dayKey());
   if(typeof _clearTombstones==='function') _clearTombstones(entries.map(function(e){return e._id;}));
   _updateEditingBanner();
   renderAll();
@@ -9974,6 +9979,8 @@ function MGApplyFix(id, patch){
   function round(v,dp){ var f=Math.pow(10,dp); return Math.round((v+Number.EPSILON)*f)/f; }
   function seq(){ return parseInt(localStorage.getItem('mg_action_seq')||'0'); }
   function tomb(){ return gj('mg_tombstones',{})||{}; }
+  // LOCAL day key (own copy — the watchdog must not depend on the main script).
+  function dk(t){ var d=t?new Date(t):new Date(); return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2); }
   function fmtMoney(cur,v){ if(cur==='IDR') return 'IDR '+Math.round(v).toLocaleString(); return (cur||'RM')+' '+round(v,2).toFixed(2); }
 
   var snap=null;        // in-memory baseline: {seq,ids,fields,rates}
@@ -10016,7 +10023,7 @@ function MGApplyFix(id, patch){
       Object.keys(snap.ids).forEach(function(id){ if(!cur.ids[id]) removed.push(id); });
       var lg=gj(LG,null);
       // Only ever restore a SAME-DAY last-good (never silently bring back yesterday's data).
-      var lgT = lg && Array.isArray(lg.entries) && lg.at && (new Date(lg.at).toISOString().slice(0,10)===new Date().toISOString().slice(0,10));
+      var lgT = lg && Array.isArray(lg.entries) && lg.at && (dk(lg.at)===dk());
       if(added.length||removed.length){
         F.push({sev:'high',code:'ghost_member',auto:true,msg:'已自动拦下一次幽灵客户变动（无操作下 +'+added.length+' / -'+removed.length+'）',
           repair:function(){ if(lgT) writeEntries(lg.entries,'幽灵客户'); }});
@@ -10097,9 +10104,9 @@ function MGApplyFix(id, patch){
     // today, which is what caused the whole "today shows yesterday" + duplicate-CD disaster.
     // It now ASKS the operator and never auto-restores stale (cross-day) data.
     var _lg7=gj(LG,null);
-    var _today7=new Date().toISOString().slice(0,10);
+    var _today7=dk();
     var _lg7Today = _lg7 && _lg7.at && Array.isArray(_lg7.entries) && _lg7.entries.length>0 &&
-                    (new Date(_lg7.at).toISOString().slice(0,10)===_today7);
+                    (dk(_lg7.at)===_today7);
     if(snap && curSeq===snap.seq && Object.keys(snap.ids).length>0 && entries.length===0 &&
        !recentOp(['delete','batch_delete','clear','load','sync_apply'],30000) && _lg7Today){
       F.push({sev:'high',code:'wipe',
