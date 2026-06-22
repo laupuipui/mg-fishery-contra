@@ -5344,6 +5344,57 @@ function _autoCarryCD(force){
   } catch(e){ console.warn('_autoCarryCD failed:', e); }
 }
 
+// ── ONE-TIME FIX (v1) — clean today's wrongly carried-in C/D and restart C/D tomorrow ──
+// The CD live-start was mistakenly set to today, so yesterday's C/D got carried (and
+// duplicated) into today. This runs ONCE per device, only within a short date window, and
+// is fully reversible (backs up first). Remove this function in a later release.
+function _cdFixV1(){
+  try {
+    if(localStorage.getItem('mg_cd_fix_v1')) return;                 // already done on this device
+    var todayKey = new Date().toISOString().slice(0,10);
+    if(todayKey > '2026-06-30'){ localStorage.setItem('mg_cd_fix_v1','expired'); return; }  // safety bound
+    var todayName = _todayDateStr();
+    var ent = JSON.parse(localStorage.getItem(ENTRIES_KEY)||'[]');
+    var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
+    function carried(e){ return e && e.isCD && e.cdSource; }
+    var removedIds = (Array.isArray(ent)?ent:[]).filter(carried).map(function(e){ return e._id; });
+
+    // 1) back up current state (recoverable via 数据恢复)
+    try {
+      var bk = JSON.parse(localStorage.getItem('mg_overwrite_backups')||'[]');
+      bk.unshift({ ts:Date.now(), replacedAt:new Date().toISOString(),
+        original:{ id:'cdfix_'+Date.now(), name:'CD污染清理前备份', date:new Date().toISOString(),
+                   entries:(Array.isArray(ent)?ent:[]), charts:(Array.isArray(charts)?charts:[]) } });
+      localStorage.setItem('mg_overwrite_backups', JSON.stringify(bk.slice(0,14)));
+    } catch(e){}
+
+    // 2) drop carried rows from the live working set (today's real new customers are kept)
+    if(Array.isArray(ent)){
+      entries = ent.filter(function(e){ return !carried(e); });
+    }
+    // 3) drop them from today's chart too
+    if(Array.isArray(charts)){
+      charts.forEach(function(c){ if(c && c.name && c.name.trim()===todayName && Array.isArray(c.entries)) c.entries = c.entries.filter(function(e){ return !carried(e); }); });
+      safeSetItem(CHARTS_KEY, JSON.stringify(charts));
+    }
+    // 4) tombstone removed ids so sync won't bring them back on other devices
+    if(removedIds.length && typeof _addTombstones==='function') _addTombstones(removedIds);
+
+    // 5) C/D starts TOMORROW; don't auto-carry again today
+    var tomorrow = new Date(Date.now()+86400000).toISOString().slice(0,10);
+    localStorage.setItem('mg_cd_live_start', tomorrow);
+    localStorage.setItem('mg_autocarry_date', todayKey);
+    localStorage.setItem('mg_cd_fix_v1', new Date().toISOString());
+
+    // 6) persist + tell the watchdog this was legitimate
+    if(typeof _bumpAction==='function') _bumpAction();
+    if(typeof saveEntries==='function') saveEntries();
+    if(typeof renderAll==='function') renderAll();
+    if(typeof updateCDBadge==='function') updateCDBadge();
+    if(removedIds.length && typeof _showSuccessToast==='function') _showSuccessToast('已清理今天误带入的 C/D '+removedIds.length+' 条，C/D 从明天开始');
+  } catch(e){ console.warn('_cdFixV1 failed:', e); }
+}
+
 // ── C/D reconciliation: compare each carried entry against its source's remaining ──
 function _fmtByGroup(group, currency, amt){
   if(currency==='SGD') return 'SGD '+fmtN(amt);
@@ -9625,6 +9676,7 @@ function init(){
   setTimeout(function(){
     checkLoginRequiredOverlay();
     _checkDailyChartRotation();
+    if(typeof _cdFixV1 === 'function') _cdFixV1();   // one-time cleanup of today's wrongly-carried C/D
     if(typeof _autoCarryCD === 'function') setTimeout(function(){ _autoCarryCD(); }, 700);  // auto-bring outstanding C/D (once/day)
     _checkDailyExcelBackup();
     _checkDailyRatesReminder();
