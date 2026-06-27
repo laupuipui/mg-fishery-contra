@@ -1459,6 +1459,8 @@ function buildSnapshot() {
     cdDeleted: cdDeleted,
     cdDismissed: (function(){ try{ return JSON.parse(localStorage.getItem('mg_cd_dismissed')||'[]'); }catch(e){ return []; } })(),
     tombstones: _getTombstones(),   // deleted ids — so deletions propagate across devices
+    cdLiveStart:   localStorage.getItem('mg_cd_live_start') || null,         // shared C/D start day
+    cdLiveStartAt: parseInt(localStorage.getItem('mg_cd_live_start_at')||'0'),
     savedAt:   new Date().toISOString()
   };
 }
@@ -1478,7 +1480,7 @@ function _mergeChartPair(a, b){
   // Tombstones express "deleted from TODAY's working set" — apply them ONLY to the
   // chart named for today. Historical charts are immutable records (and CD sources);
   // a deletion today must never strip a same-_id row out of yesterday's chart.
-  var _isTodayChart = (function(){ try { return (primary.name||'').trim() === _todayDateStr(); } catch(_){ return false; } })();
+  var _isTodayChart = (function(){ try { return (typeof _cdBaseDay==='function'?_cdBaseDay(primary.name):(primary.name||'').trim()) === _todayDateStr(); } catch(_){ return false; } })();
   var byKey = {}, order = [];
   function add(list, isPrimary){
     (list||[]).forEach(function(e){
@@ -1518,10 +1520,12 @@ function _reconcileLiveToTodayChart(charts){
   } catch(e){ console.warn('_reconcileLiveToTodayChart failed:', e); }
 }
 
-// Merge two chart LISTS by name (union entries per same-name chart). No row ever lost.
+// Merge two chart LISTS by DAY (union entries per day; "(恢复)"/suffix copies collapse into the
+// real day). No row ever lost. Merged charts are renamed to the clean base-day.
 function _mergeChartLists(localList, driveList){
   var map = {}, order = [];
-  function key(c){ return 'name:'+((c.name||'').trim()); }
+  function bday(c){ return (typeof _cdBaseDay==='function') ? _cdBaseDay(c.name) : String((c.name||'')).trim(); }
+  function key(c){ return 'day:'+bday(c); }
   function take(list){
     (list||[]).forEach(function(c){
       if(!c) return;
@@ -1531,7 +1535,7 @@ function _mergeChartLists(localList, driveList){
     });
   }
   take(localList); take(driveList);
-  var merged = order.map(function(k){ return map[k]; });
+  var merged = order.map(function(k){ var c=map[k]; var bd=bday(c); if(c && c.name && c.name.trim()!==bd) c=Object.assign({},c,{name:bd}); return c; });
   merged.sort(function(a,b){ return (b.date?new Date(b.date).getTime():0) - (a.date?new Date(a.date).getTime():0); });
   if(merged.length > 365) merged = merged.slice(0,365);
   return merged;
@@ -1588,6 +1592,16 @@ function applySnapshot(data, applyEntries) {
       changed = true;
     }
     // If Drive's rates are from a previous day, IGNORE them — local clearing is correct
+  }
+  // Shared C/D start day — adopt the most RECENT deliberate decision across devices, so all
+  // devices carry from the same day (auto-set values carry timestamp 0 and never override).
+  if (data.cdLiveStart) {
+    var _driveAt = parseInt(data.cdLiveStartAt||0);
+    var _localAt = parseInt(localStorage.getItem('mg_cd_live_start_at')||'0');
+    if(_driveAt > _localAt){
+      localStorage.setItem('mg_cd_live_start', data.cdLiveStart);
+      localStorage.setItem('mg_cd_live_start_at', String(_driveAt));
+    }
   }
   // Deletion tombstones — MUST be merged BEFORE the chart merge below, so a row deleted on
   // another device gets stripped from today's chart (and thus from the reconciled live set).
@@ -1676,6 +1690,9 @@ function applySnapshot(data, applyEntries) {
   }
   // Monitor gets the LAST word after every sync — strips any resurrected/deleted rows etc.
   if(typeof _monitorScan === 'function'){ setTimeout(function(){ _monitorScan('sync'); }, 150); }
+  // First successful pull merged in other devices' work → safe to auto-carry now (no dup carries).
+  _mgFirstPullDone = true;
+  if(typeof _maybeAutoCarry === 'function'){ setTimeout(_maybeAutoCarry, 250); }
 }
 
 // ── Create/update backup file in Drive ──
@@ -2869,7 +2886,7 @@ function saveEntries(skipSnapshot){
   _bumpAction();                   // a legitimate change just happened (for the watchdog)
   if(ok === false){ try { localStorage.setItem('mg_save_failed', String(Date.now())); } catch(e){} }  // R13 signal
   _persistCurrentChart();          // per-operation chart save — entries never diverge from its chart
-  if(!skipSnapshot) saveLocalSnapshot();
+  if(!skipSnapshot) _saveLocalSnapshotDebounced();   // recovery snapshot — debounced (perf; was per-click 3MB)
   _pushToDrive();
   // Bound chart is now in sync with entries → mark saved (button shows ✅).
   if(typeof markSaved === 'function') markSaved();
@@ -2942,6 +2959,9 @@ function saveLocalSnapshot(){
     } catch(e2) {}
   }
 }
+// Debounced recovery snapshot — avoids serializing the (up to 3MB) snapshot list on every
+// single click; one snapshot ~1.2s after activity is plenty for recovery.
+var _saveLocalSnapshotDebounced = debounce(function(){ try{ saveLocalSnapshot(); }catch(e){} }, 1200);
 function saveCustomers(){
   safeSetItem(MASTER_LIST_KEY, JSON.stringify(customers));
   localStorage.setItem('mg_last_write', Date.now().toString());
@@ -4933,21 +4953,18 @@ function _cdComputeUnalloc(e){
   }
   if(totalAmt === 0) return null;
   var threshold = (e.group === 'RP') ? 0.5 : 0.005;
-  var rem;
-  if(totalAmt > 0){
-    if(allocSum >= totalAmt - threshold) return null;  // fully (or over) allocated → not a carry
-    rem = totalAmt - allocSum;                          // positive remainder
-  } else {
-    // Advanced payment / overpay: carry the NEGATIVE balance until it's settled (~0).
-    rem = totalAmt - allocSum;                          // negative
-    if(Math.abs(rem) <= threshold) return null;
-  }
+  // Correct contra-ledger rule: carry whatever BALANCE remains, with sign.
+  //   rem > 0  → still owed (under-allocated)        → carry positive
+  //   rem < 0  → OVER-paid / advance (over-allocated or negative amount) → carry negative
+  //   |rem| ≤ threshold → settled → do not carry
+  var rem = totalAmt - allocSum;
+  if(Math.abs(rem) <= threshold) return null;   // settled within tolerance
   return {
     totalAmt: totalAmt,
     allocSum: allocSum,
     remaining: rem,
     isSGDPending: false,
-    isAdvance: totalAmt < 0,
+    isAdvance: rem < 0,
     currency: e.currency || (e.group === 'RP' ? 'IDR' : e.group === 'THB' ? 'THB' : 'RM')
   };
 }
@@ -4975,7 +4992,9 @@ function _cdConsumedSet(){
     });
   }
   scan(entries);
-  try { JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]').forEach(function(c){ if(c&&Array.isArray(c.entries)) scan(c.entries); }); } catch(e){}
+  // Scan the CANONICAL (deduped) day view — junk/restore duplicates must not falsely mark a
+  // real unfinished row as "already carried" (which would stop it from carrying).
+  try { (typeof _cdCanonicalCharts==='function' ? _cdCanonicalCharts() : JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]')).forEach(function(c){ if(c&&Array.isArray(c.entries)) scan(c.entries); }); } catch(e){}
   return set;
 }
 // Set of source refs the user manually dismissed ("Remove" in the CD list).
@@ -4997,35 +5016,51 @@ function _cdChartAllocTotal(c){
   if(!c || !Array.isArray(c.entries)) return 0;
   return c.entries.reduce(function(s,e){ if(!e) return s; return s + Math.abs((e.act||0)+(e.yes||0)+(e.hs||0)+(e.cash||0)+(e.btHeng||0)); }, 0);
 }
-// Collapse duplicate same-NAME charts (same day) to ONE canonical version — the one the
-// user actually worked on = most total allocations (tie → more entries → newer date).
-// This prevents CD from reading a stale/blank duplicate of a day and carrying settled rows.
+// Base DAY name — strip any trailing "(恢复)"/parenthetical suffix so all copies of the same
+// day (incl. restore duplicates with a different name) group together.
+function _cdBaseDay(name){ return String(name||'').replace(/\s*\([^)]*\)\s*$/,'').trim(); }
+// Customer identity within a day (name without the C/D tag + account + group).
+function _cdCustKey(e){ return String(e&&e.name||'').replace(/\s*\[C\/D[^\]]*\]/g,'').trim().toLowerCase()+'|'+(e&&e.account||'')+'|'+(e&&e.group||''); }
+function _cdAllocOf(e){ return Math.abs((e&&e.act||0)+(e&&e.yes||0)+(e&&e.hs||0)+(e&&e.cash||0)+(e&&e.btHeng||0)); }
+
+// Build ONE authoritative chart per DAY: collapse all copies of that day (including
+// "(恢复)" duplicates) and, per customer, keep the MOST-ALLOCATED (most settled) version.
+// This is the heart of the C/D fix — a settled customer can never be read back as unfinished
+// from a stale/blank copy. Cached by the raw mg_charts string (recompute only when it changes).
+var _cdCanonCache = { raw:null, val:null };
 function _cdCanonicalCharts(){
-  var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
-  var byName = {};
-  charts.forEach(function(c){
-    if(!c || !c.name) return;
-    var k = String(c.name).trim();
-    var cur = byName[k];
-    if(!cur){ byName[k] = c; return; }
-    var ca=_cdChartAllocTotal(c), cb=_cdChartAllocTotal(cur);
-    var na=(c.entries||[]).length, nb=(cur.entries||[]).length;
-    var ta=c.date?new Date(c.date).getTime():0, tb=cur.date?new Date(cur.date).getTime():0;
-    var better = (ca!==cb) ? (ca>cb) : (na!==nb) ? (na>nb) : (ta>tb);
-    if(better) byName[k] = c;
+  var raw = localStorage.getItem(CHARTS_KEY)||'[]';
+  if(_cdCanonCache.raw === raw && _cdCanonCache.val) return _cdCanonCache.val;
+  var charts; try{ charts = JSON.parse(raw); }catch(e){ charts = []; }
+  var byDay = {};
+  charts.forEach(function(c){ if(!c || !c.name || !Array.isArray(c.entries)) return; var d=_cdBaseDay(c.name); (byDay[d]=byDay[d]||[]).push(c); });
+  var out = [];
+  Object.keys(byDay).forEach(function(day){
+    var copies = byDay[day];
+    var primary = copies[0], pa = _cdChartAllocTotal(copies[0]);   // metadata (id/date) from the most-allocated copy
+    copies.forEach(function(c){ var a=_cdChartAllocTotal(c); if(a>pa){ pa=a; primary=c; } });
+    var best = {}, order = [];
+    copies.forEach(function(c){
+      (c.entries||[]).forEach(function(e){
+        if(!e) return;
+        var k=_cdCustKey(e), cur=best[k];
+        if(!cur){ best[k]=e; order.push(k); return; }
+        var ae=_cdAllocOf(e), ac=_cdAllocOf(cur);
+        if(ae>ac || (ae===ac && (e.updatedAt||0)>(cur.updatedAt||0))) best[k]=e;   // most-settled wins
+      });
+    });
+    out.push(Object.assign({}, primary, { name: day, entries: order.map(function(k){ return best[k]; }) }));
   });
-  return Object.keys(byName).map(function(k){ return byName[k]; });
+  _cdCanonCache.raw = raw; _cdCanonCache.val = out;
+  return out;
 }
-// Set of entry _ids that are FULLY SETTLED in ANY chart — duplicate-day charts share _ids,
-// so if a row is settled in its real copy we must never carry it from a blank copy.
+// Set of entry _ids that are FULLY SETTLED in the canonical (real) view of each day.
 function _cdSettledIds(){
   var set = {};
-  try {
-    JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]').forEach(function(c){
-      if(!c || !Array.isArray(c.entries)) return;
-      c.entries.forEach(function(e){ if(e && e._id && !_cdComputeUnalloc(e)) set[e._id] = 1; });  // null unalloc = settled
-    });
-  } catch(e){}
+  _cdCanonicalCharts().forEach(function(c){
+    if(!c || !Array.isArray(c.entries)) return;
+    c.entries.forEach(function(e){ if(e && e._id && !_cdComputeUnalloc(e)) set[e._id] = 1; });  // null unalloc = settled
+  });
   return set;
 }
 
@@ -5039,8 +5074,8 @@ function _cdBuildItems(filterChartId){
   var items = [];
   charts.forEach(function(c){
     if(!c || !Array.isArray(c.entries)) return;
-    // Skip today's chart — we shouldn't carry-down from today's own work
-    if(c.name && c.name.trim() === todayStr) return;
+    // Skip today's chart — we shouldn't carry-down from today's own work (base-day compare)
+    if(c.name && _cdBaseDay(c.name) === todayStr) return;
     if(c.id === currentChartId && currentChartName && currentChartName.trim() === todayStr) return;
     if(filterChartId && c.id !== filterChartId) return;
     c.entries.forEach(function(e, eIdx){
@@ -5345,6 +5380,21 @@ function confirmCD(){
   }
 }
 
+// Run the daily auto-carry ONCE, and only AFTER (a) the daily chart rotation has set up
+// today's chart, and (b) the first Drive pull has merged in other devices' work — so two
+// devices opening near the same time can't each carry the same rows (duplicate carry-in).
+// Offline / not-logged-in: an init fallback timer fires it once rotation is done.
+var _mgRotationDone = false;
+var _mgFirstPullDone = false;
+var _mgAutoCarryRan = false;
+function _maybeAutoCarry(viaFallback){
+  if(_mgAutoCarryRan) return;
+  if(!_mgRotationDone) return;                          // wait until today's chart exists
+  if(!_mgFirstPullDone && !viaFallback) return;         // wait for the first Drive pull (or the offline fallback)
+  _mgAutoCarryRan = true;
+  try { if(typeof _autoCarryCD === 'function') _autoCarryCD(); } catch(e){ console.warn('auto-carry failed:', e); }
+}
+
 // AUTO carry-in: bring every outstanding C/D candidate (incl. negative overpay/advance)
 // into today's table automatically so nothing is ever missed. Idempotent via the
 // consumed-set (carried rows have cdSource) + a once-per-day guard. Runs only on today.
@@ -5454,6 +5504,35 @@ function _cdRefixTodayV1(){
   } catch(e){ console.warn('_cdRefixTodayV1 failed:', e); }
 }
 
+// ── ONE-TIME CLEANUP — collapse duplicate / "(恢复)" charts into ONE chart per DAY. Uses the
+// SAME merge as cross-device sync (union entries by _id → NO row is ever dropped), so it's
+// data-safe. Backs up the full chart list first. Tidies history + speeds things up. ──
+function _cdDedupeChartsV1(){
+  try{
+    if(localStorage.getItem('mg_cd_dedupe_v1')) return;
+    var todayKey = _dayKey();
+    if(todayKey > '2026-07-31'){ localStorage.setItem('mg_cd_dedupe_v1','expired'); return; }
+    var raw = localStorage.getItem(CHARTS_KEY)||'[]';
+    var orig; try{ orig = JSON.parse(raw); }catch(e){ localStorage.setItem('mg_cd_dedupe_v1','done'); return; }
+    if(!Array.isArray(orig) || orig.length === 0){ localStorage.setItem('mg_cd_dedupe_v1','done'); return; }
+    var merged = _mergeChartLists(orig, []);   // collapse same-day copies, union entries (no loss)
+    if(!Array.isArray(merged) || merged.length >= orig.length){ localStorage.setItem('mg_cd_dedupe_v1','done'); return; }  // nothing duplicated
+    try {
+      var bk = JSON.parse(localStorage.getItem('mg_overwrite_backups')||'[]');
+      bk.unshift({ ts: Date.now(), replacedAt: new Date().toISOString(), reason: 'dedupe_charts_v1',
+                   original: { id:'dedupe_'+Date.now(), name:'重复表清理前备份', date:new Date().toISOString(), entries:[], charts: orig } });
+      localStorage.setItem('mg_overwrite_backups', JSON.stringify(bk.slice(0,14)));
+    } catch(e){}
+    safeSetItem(CHARTS_KEY, JSON.stringify(merged));
+    localStorage.setItem('mg_cd_dedupe_v1','done');
+    if(typeof _reconcileLiveToTodayChart === 'function') _reconcileLiveToTodayChart(merged);
+    if(typeof _bumpAction === 'function') _bumpAction();
+    if(typeof renderAll === 'function') renderAll();
+    if(typeof updateCDBadge === 'function') updateCDBadge();
+    if(typeof _showSuccessToast === 'function') _showSuccessToast('已合并重复表格（'+orig.length+'→'+merged.length+' 张），数据更干净');
+  } catch(e){ console.warn('_cdDedupeChartsV1 failed:', e); }
+}
+
 // ── ONE-TIME FIX (v1) — clean today's wrongly carried-in C/D and restart C/D tomorrow ──
 // The CD live-start was mistakenly set to today, so yesterday's C/D got carried (and
 // duplicated) into today. This runs ONCE per device, only within a short date window, and
@@ -5492,7 +5571,7 @@ function _cdFixV1(){
 
     // 5) C/D starts TOMORROW; don't auto-carry again today
     var tomorrow = _dayKey(Date.now()+86400000);   // LOCAL tomorrow
-    localStorage.setItem('mg_cd_live_start', tomorrow);
+    _setCdLiveStart(tomorrow);
     localStorage.setItem('mg_autocarry_date', todayKey);
     localStorage.setItem('mg_cd_fix_v1', new Date().toISOString());
 
@@ -5538,7 +5617,7 @@ function _freshStartV1(){
     if(typeof _setCurrentChart==='function') _setCurrentChart(t.id, tn);
     localStorage.setItem('mg_last_active_chart_date', todayKey);
     // 4) C/D restarts from today; never carry the polluted past
-    localStorage.setItem('mg_cd_live_start', todayKey);
+    _setCdLiveStart(todayKey);
     localStorage.setItem('mg_autocarry_date', todayKey);
     // 5) mark legitimate so the watchdog won't fight it; clear stale last-good
     if(typeof _logOp==='function') _logOp('clear','全新开始：清空今日');
@@ -5590,8 +5669,16 @@ function _cdFindSource(cdSource){
 // existing messy history is never auto-carried or rewritten.
 function _cdStartKey(){
   var k = localStorage.getItem('mg_cd_live_start');
-  if(!k){ k = _dayKey(); localStorage.setItem('mg_cd_live_start', k); }
+  // First run with no value: auto-set to today but with a LOW priority timestamp (0), so any
+  // real decision (fresh-start/cleanup) or a synced value from another device overrides it.
+  if(!k){ k = _dayKey(); localStorage.setItem('mg_cd_live_start', k); localStorage.setItem('mg_cd_live_start_at', '0'); }
   return k;
+}
+// Set the C/D start date as a DELIBERATE decision (high priority) — synced across devices,
+// latest decision wins. Used by fresh-start / cd-fix / cleanup.
+function _setCdLiveStart(day){
+  localStorage.setItem('mg_cd_live_start', day);
+  localStorage.setItem('mg_cd_live_start_at', String(Date.now()));
 }
 function _cdChartDateKey(ch){ try{ return _dayKey(ch.date); }catch(_){ return ''; } }
 // Group-aware sum of a row's allocations.
@@ -5625,6 +5712,11 @@ function _cdFindCarrier(node){
 function _cdSyncChain(pivot){
   try{
     if(!pivot) return;
+    // PERF: only carried rows (cdSource) or edits to a PAST day need chain syncing. A normal
+    // today entry has no source and no descendant (today is the latest chart), so skip the
+    // expensive full-chart scans — this is the common case on every allocation click.
+    var _onToday = (!currentChartName || currentChartName.trim()===_todayDateStr());
+    if(!pivot.cdSource && _onToday) return;
     var start=_cdStartKey();
     var dirty={};        // chartId -> chart object to write back
     var liveDirty=false;
@@ -9839,10 +9931,15 @@ function init(){
   setTimeout(function(){
     checkLoginRequiredOverlay();
     _checkDailyChartRotation();
+    if(typeof _cdDedupeChartsV1 === 'function') _cdDedupeChartsV1();   // one-time: collapse duplicate/(恢复) charts (backed up)
     if(typeof _cdFixV1 === 'function') _cdFixV1();   // one-time cleanup of today's wrongly-carried C/D
     if(typeof _freshStartV1 === 'function') _freshStartV1();   // one-time clean slate for today (post-corruption)
     if(typeof _cdRefixTodayV1 === 'function') _cdRefixTodayV1();   // one-time fix for today's wrong auto-carries
-    if(typeof _autoCarryCD === 'function') setTimeout(function(){ _autoCarryCD(); }, 700);  // auto-bring outstanding C/D (once/day)
+    _mgRotationDone = true;                          // today's chart is ready
+    if(typeof _maybeAutoCarry === 'function'){
+      _maybeAutoCarry();                             // if the first pull already landed, carry now
+      setTimeout(function(){ _maybeAutoCarry(true); }, 6000);  // fallback: offline / no pull within 6s → carry anyway (once)
+    }
     _checkDailyExcelBackup();
     _checkDailyRatesReminder();
     _syncStatusSelfCorrect();
@@ -10098,6 +10195,7 @@ function MGApplyFix(id, patch){
 
   var snap=null;        // in-memory baseline: {seq,ids,fields,rates}
   var cardOpen=false;
+  var _wRawC=null, _wCharts=null;   // PERF: cache parsed mg_charts; re-parse only when it changes
 
   function log(sev,code,msg){ try{var l=gj(LOG,[]); l.unshift({ts:Date.now(),sev:sev,code:code,msg:msg}); if(l.length>200)l=l.slice(0,200); sset(LOG,l);}catch(e){} }
   function backup(reason){ try{var p=gj(BK,[]); p.unshift({ts:Date.now(),replacedAt:new Date().toISOString(),original:{id:'audit_'+Date.now(),name:'监管自动备份（'+reason+'）',date:new Date().toISOString(),entries:gj('mg_entries',[]),charts:gj('mg_charts',[])}}); if(p.length>14)p=p.slice(0,14); sset(BK,p);}catch(e){} }
@@ -10123,7 +10221,10 @@ function MGApplyFix(id, patch){
     var rawE=localStorage.getItem('mg_entries'), rawC=localStorage.getItem('mg_charts');
     var entries=null, charts=null;
     if(rawE!=null){ try{ entries=JSON.parse(rawE); }catch(e){ F.push({sev:'high',code:'struct',card:true,msg:'今日记录存储损坏，请联系老板'}); return F; } }
-    if(rawC!=null){ try{ charts=JSON.parse(rawC); }catch(e){ F.push({sev:'high',code:'struct2',card:true,msg:'表格存储损坏，请联系老板'}); } }
+    if(rawC!=null){
+      if(rawC===_wRawC){ charts=_wCharts; }   // unchanged → reuse cached parse (avoids re-parsing ~MB every 2s)
+      else { try{ charts=JSON.parse(rawC); _wRawC=rawC; _wCharts=charts; }catch(e){ F.push({sev:'high',code:'struct2',card:true,msg:'表格存储损坏，请联系老板'}); } }
+    }
     if(entries!==null && !Array.isArray(entries)){ F.push({sev:'high',code:'struct',card:true,msg:'今日记录存储损坏，请联系老板'}); return F; }
     if(charts!==null && !Array.isArray(charts)){ F.push({sev:'high',code:'struct2',card:true,msg:'表格存储损坏，请联系老板'}); charts=null; }
     if(!Array.isArray(entries)) return F;
