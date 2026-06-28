@@ -5507,6 +5507,27 @@ function _cdRefixTodayV1(){
 // ── ONE-TIME CLEANUP — collapse duplicate / "(恢复)" charts into ONE chart per DAY. Uses the
 // SAME merge as cross-device sync (union entries by _id → NO row is ever dropped), so it's
 // data-safe. Backs up the full chart list first. Tidies history + speeds things up. ──
+// ── ONE-TIME (2026-06-28 only) — today was reconciled BY HAND on all devices after the
+// junk-chart mis-carry. Block ALL auto/forced carry-in for today so nothing pollutes the
+// manual fix, and make sure CD starts no later than today so TOMORROW carries today's real
+// outstanding. From 2026-06-29 on, auto-carry runs normally (now reading the clean view). ──
+function _cdSuppressTodayV1(){
+  try{
+    if(localStorage.getItem('mg_cd_suppress_today_v1')) return;
+    var todayKey = _dayKey();
+    if(todayKey !== '2026-06-28'){ localStorage.setItem('mg_cd_suppress_today_v1','na'); return; }  // only the hand-fixed day
+    localStorage.setItem('mg_autocarry_date', todayKey);                 // block normal auto-carry today
+    // Neutralise the older one-time FORCE-carry fixes so they can't write into today either.
+    localStorage.setItem('mg_cd_fix_v1',    localStorage.getItem('mg_cd_fix_v1')    || 'suppressed');
+    localStorage.setItem('mg_fresh_start_v1', localStorage.getItem('mg_fresh_start_v1') || 'suppressed');
+    localStorage.setItem('mg_cd_refix_v1',  localStorage.getItem('mg_cd_refix_v1')  || 'suppressed');
+    // CD start must be <= today so tomorrow can carry today's outstanding.
+    var start = localStorage.getItem('mg_cd_live_start');
+    if((!start || start > todayKey) && typeof _setCdLiveStart === 'function') _setCdLiveStart(todayKey);
+    localStorage.setItem('mg_cd_suppress_today_v1','done');
+  }catch(e){ console.warn('_cdSuppressTodayV1 failed:', e); }
+}
+
 function _cdDedupeChartsV1(){
   try{
     if(localStorage.getItem('mg_cd_dedupe_v1')) return;
@@ -9931,6 +9952,7 @@ function init(){
   setTimeout(function(){
     checkLoginRequiredOverlay();
     _checkDailyChartRotation();
+    if(typeof _cdSuppressTodayV1 === 'function') _cdSuppressTodayV1();  // one-time: protect today's hand-fixed records (no carry into today)
     if(typeof _cdDedupeChartsV1 === 'function') _cdDedupeChartsV1();   // one-time: collapse duplicate/(恢复) charts (backed up)
     if(typeof _cdFixV1 === 'function') _cdFixV1();   // one-time cleanup of today's wrongly-carried C/D
     if(typeof _freshStartV1 === 'function') _freshStartV1();   // one-time clean slate for today (post-corruption)
