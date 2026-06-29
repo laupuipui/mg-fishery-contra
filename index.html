@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260629110257 -->
+<!-- MG Fishery Contra System v20260629112030 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260629110257';  /*BUILD*/
+window.__APP_VER__ = '20260629112030';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -5125,7 +5125,7 @@ function _cdBuildItems(filterChartId){
   } else if(filterChartId === '__ALL__'){
     sourceCharts = _cdCanonicalCharts().filter(function(c){ return c && Array.isArray(c.entries) && _cdBaseDay(c.name)!==todayStr; });
   } else {
-    sourceCharts = _cdCanonicalCharts().filter(function(c){ return c && c.id===filterChartId && _cdBaseDay(c.name)!==todayStr; });
+    sourceCharts = _cdCanonicalCharts().filter(function(c){ return c && String(c.id)===String(filterChartId) && _cdBaseDay(c.name)!==todayStr; });
   }
   var items = [];
   sourceCharts.forEach(function(c){
@@ -5216,8 +5216,8 @@ function renderCDList(){
   var listEl = document.getElementById('cd-list');
   var sel = selEl ? selEl.value : 'all';
 
-  var filterId = (sel === 'all') ? '__ALL__' : parseInt(sel);
-  if(filterId !== '__ALL__' && isNaN(filterId)) filterId = sel;  // string id fallback
+  // Keep the chart id as a STRING — chart ids may be strings; parseInt would break === matching.
+  var filterId = (sel === 'all') ? '__ALL__' : sel;
 
   _cdItems = _cdBuildItems(filterId);
 
@@ -5309,9 +5309,7 @@ function deleteCDGroup(){
     if(!confirm(isEng?'Remove ALL C/D items? (source charts are untouched; just hidden from the C/D list)':'确认移除所有 C/D 记录？（源历史不变，只是不再显示在 C/D 列表）')) return;
     _cdDismiss(_cdBuildItems('__ALL__').map(_cdItemRef));
   } else {
-    var filterId = parseInt(sel);
-    if(isNaN(filterId)) filterId = sel;
-    var srcItems = _cdBuildItems(filterId);
+    var srcItems = _cdBuildItems(sel);   // keep id as string (parseInt would break matching)
     if(!srcItems.length){ openCDModal(); return; }
     var srcName = srcItems[0].chartName || '';
     if(!confirm((isEng?'Remove C/D from: ':'移除来自「')+srcName+(isEng?'?':'」的所有 C/D 项？'))) return;
@@ -6929,7 +6927,7 @@ function exportPDF(printMode){
   const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260629110257 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260629112030 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
