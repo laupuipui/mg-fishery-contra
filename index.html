@@ -5064,40 +5064,61 @@ function _cdSettledIds(){
   return set;
 }
 
-// Build CD candidate list from historical charts (excluding today's chart).
-function _cdBuildItems(filterChartId){
-  var todayStr = _todayDateStr();  // same format saved chart names use (consistent comparison)
-  var charts = _cdCanonicalCharts();   // ONLY the authoritative copy of each day
-  var consumed = _cdConsumedSet();
-  var dismissed = _cdDismissedSet();
-  var settledIds = _cdSettledIds();
-  var items = [];
-  charts.forEach(function(c){
+// Refs already carried into TODAY (so re-running never double-carries). Scans ONLY today —
+// live entries + today's chart — NOT history. A past-day record is therefore never wrongly
+// hidden just because some OTHER day's entry references it.
+function _cdCarriedIntoTodaySet(){
+  var set = {};
+  function scan(list){ (list||[]).forEach(function(e){ if(e && e.cdSource){ if(e.cdSource.id) set['id:'+e.cdSource.id]=1; if(e.cdSource.sig) set['sig:'+e.cdSource.sig]=1; } }); }
+  try { scan(entries); } catch(_){}
+  try { var ts=_todayDateStr(); _cdCanonicalCharts().forEach(function(c){ if(c && _cdBaseDay(c.name)===ts) scan(c.entries); }); } catch(_){}
+  return set;
+}
+
+// The single immediately-preceding working day's chart (most recent canonical day before today).
+function _cdPrevDayChart(){
+  var ts=_todayDateStr(), best=null, bestT=-1;
+  _cdCanonicalCharts().forEach(function(c){
     if(!c || !Array.isArray(c.entries)) return;
-    // Skip today's chart — we shouldn't carry-down from today's own work (base-day compare)
-    if(c.name && _cdBaseDay(c.name) === todayStr) return;
-    if(c.id === currentChartId && currentChartName && currentChartName.trim() === todayStr) return;
-    if(filterChartId && c.id !== filterChartId) return;
+    if(_cdBaseDay(c.name)===ts) return;                 // exclude today
+    var tm=c.date?new Date(c.date).getTime():0;
+    if(tm>bestT){ bestT=tm; best=c; }
+  });
+  return best;
+}
+
+// C/D candidates. By DESIGN the default looks at ONLY the PREVIOUS day — a new day's table
+// carries the prior day's outstanding, never the whole accumulated history.
+//   filterChartId == null      → previous working day only  (auto-carry, badge)
+//   filterChartId == '__ALL__' → every past day w/ outstanding (manual "all sources")
+//   filterChartId == <chartId> → that one day               (manual, a specific day)
+function _cdBuildItems(filterChartId){
+  var todayStr = _todayDateStr();
+  var carried   = _cdCarriedIntoTodaySet();   // already in today → don't re-offer
+  var dismissed = _cdDismissedSet();           // user removed
+  var sourceCharts;
+  if(filterChartId == null){
+    var prev = _cdPrevDayChart();
+    sourceCharts = prev ? [prev] : [];
+  } else if(filterChartId === '__ALL__'){
+    sourceCharts = _cdCanonicalCharts().filter(function(c){ return c && Array.isArray(c.entries) && _cdBaseDay(c.name)!==todayStr; });
+  } else {
+    sourceCharts = _cdCanonicalCharts().filter(function(c){ return c && c.id===filterChartId && _cdBaseDay(c.name)!==todayStr; });
+  }
+  var items = [];
+  sourceCharts.forEach(function(c){
+    if(!c || !Array.isArray(c.entries)) return;
     c.entries.forEach(function(e, eIdx){
-      if(!e) return;
-      if(e.hidden) return;
-      if(e.cdHidden) return;                 // legacy hidden flag → treat as dismissed (read-only)
+      if(!e || e.hidden || e.cdHidden) return;
       var idRef  = _cdSrcRef(e);             // 'id:..' or 'sig:..'
       var sigRef = 'sig:' + _cdSig(e);
-      if(consumed[idRef] || consumed[sigRef]) return;   // already carried (self-healing)
+      if(carried[idRef] || carried[sigRef]) return;     // already carried into today
       if(dismissed[idRef] || dismissed[sigRef]) return; // user removed it
-      if(e._id && settledIds[e._id]) return;            // settled in some copy of this day → never carry
       var info = _cdComputeUnalloc(e);
-      if(!info) return;
+      if(!info) return;                                  // settled → skip
       items.push({
-        entry: e,
-        entryIdx: eIdx,
-        entryId: e._id || null,
-        sig: _cdSig(e),
-        chartId: c.id,
-        chartName: c.name || '',
-        chartDate: c.date || '',
-        info: info
+        entry: e, entryIdx: eIdx, entryId: e._id || null, sig: _cdSig(e),
+        chartId: c.id, chartName: c.name || '', chartDate: c.date || '', info: info
       });
     });
   });
@@ -5119,26 +5140,17 @@ function _cdDefaultSourceId(){
   return best;
 }
 
-// Get unique source charts that have CD candidates (for the filter dropdown)
+// Unique source days that still have CD candidates (for the manual dropdown), newest first.
+// The previous day is therefore first/default; older days remain reachable manually.
 function _cdGetSourceCharts(){
-  var allItems = _cdBuildItems(null);
-  var seen = {};
-  var sources = [];
+  var allItems = _cdBuildItems('__ALL__');
+  var byId = {}, order = [];
   allItems.forEach(function(it){
-    if(seen[it.chartId]) return;
-    seen[it.chartId] = true;
-    sources.push({
-      chartId: it.chartId,
-      chartName: it.chartName,
-      chartDate: it.chartDate,
-      count: 0
-    });
+    if(!byId[it.chartId]){ byId[it.chartId] = { chartId:it.chartId, chartName:it.chartName, chartDate:it.chartDate, count:0 }; order.push(it.chartId); }
+    byId[it.chartId].count++;
   });
-  // Count items per source
-  allItems.forEach(function(it){
-    var s = sources.find(function(x){ return x.chartId === it.chartId; });
-    if(s) s.count++;
-  });
+  var sources = order.map(function(id){ return byId[id]; });
+  sources.sort(function(a,b){ return (b.chartDate?new Date(b.chartDate).getTime():0) - (a.chartDate?new Date(a.chartDate).getTime():0); });
   return sources;
 }
 
@@ -5154,16 +5166,17 @@ function openCDModal(){
     return;
   }
 
-  // Default to "All sources" so NO unfinished item is ever hidden by default
-  // (correctness > tidiness). User can still narrow to a specific day.
+  // Default to the PREVIOUS day (newest source) — that's what a new day should carry.
+  // "All sources" stays available for manually reaching older days.
   var totalCount = sources.reduce(function(s,x){return s+x.count;},0);
-  var opts = [{ value:'all', label:(isEng?'All sources':'全部来源')+' ('+totalCount+')' }];
   sources.forEach(function(s){
     var dispDate = '';
     try { dispDate = new Date(s.chartDate).toLocaleDateString('en-MY'); } catch(_){}
-    opts.push({ value:String(s.chartId), label:(s.chartName||dispDate)+' ('+s.count+')' });
+    s._label = (s.chartName||dispDate)+' ('+s.count+')';
   });
-  var selVal = 'all';
+  var opts = sources.map(function(s){ return { value:String(s.chartId), label:s._label }; });
+  opts.push({ value:'all', label:(isEng?'All sources':'全部来源')+' ('+totalCount+')' });
+  var selVal = String(sources[0].chartId);   // previous day = newest = first
   var optsHTML = opts.map(function(o){
     return '<option value="'+o.value+'"'+(o.value===selVal?' selected':'')+'>'+o.label+'</option>';
   }).join('');
@@ -5181,8 +5194,8 @@ function renderCDList(){
   var listEl = document.getElementById('cd-list');
   var sel = selEl ? selEl.value : 'all';
 
-  var filterId = (sel === 'all') ? null : parseInt(sel);
-  if(isNaN(filterId)) filterId = sel;  // string id fallback
+  var filterId = (sel === 'all') ? '__ALL__' : parseInt(sel);
+  if(filterId !== '__ALL__' && isNaN(filterId)) filterId = sel;  // string id fallback
 
   _cdItems = _cdBuildItems(filterId);
 
@@ -5272,7 +5285,7 @@ function deleteCDGroup(){
 
   if(sel === 'all'){
     if(!confirm(isEng?'Remove ALL C/D items? (source charts are untouched; just hidden from the C/D list)':'确认移除所有 C/D 记录？（源历史不变，只是不再显示在 C/D 列表）')) return;
-    _cdDismiss(_cdBuildItems(null).map(_cdItemRef));
+    _cdDismiss(_cdBuildItems('__ALL__').map(_cdItemRef));
   } else {
     var filterId = parseInt(sel);
     if(isNaN(filterId)) filterId = sel;
@@ -5411,25 +5424,20 @@ function _autoCarryCD(force){
     var startKey = (typeof _cdStartKey==='function') ? _cdStartKey() : '1970-01-01';
     var items = (typeof _cdBuildItems === 'function') ? _cdBuildItems(null) : [];
     items = items.filter(function(it){ var dk=''; try{ dk=_dayKey(it.chartDate); }catch(_){}; return dk && dk>=startKey; });
-    localStorage.setItem('mg_autocarry_date', todayKey);   // mark done even if 0 (don't retry all day)
-    if(!items.length) return;
+    if(!items.length){ localStorage.setItem('mg_autocarry_date', todayKey); return; }   // nothing to carry → done for today
 
-    // ── Anomaly guard: normal carries proceed automatically; only SUSPICIOUS ones are held. ──
-    // "Whole day" (almost every row of a source day would carry) or an abnormally large count
-    // usually means we're reading a bad/blank duplicate — pause and let the operator verify.
-    var canonCount = {};
-    _cdCanonicalCharts().forEach(function(c){ if(c) canonCount[String(c.id)] = (c.entries||[]).length; });
-    var perDay = {};
-    items.forEach(function(it){ var k=String(it.chartId); perDay[k]=(perDay[k]||0)+1; });
-    var wholeDay = Object.keys(perDay).some(function(k){ var tot=canonCount[k]||0; return tot>3 && perDay[k] >= tot-1; });
-    var tooMany  = items.length > 25;
-    var settledLeak = items.some(function(it){ return it.entry && it.entry._id && !_cdComputeUnalloc(it.entry); });
-    if(wholeDay || tooMany || settledLeak){
+    // ── Anomaly guard: we now read ONLY the previous day, so the old "accumulated 100+" can't
+    // happen. The remaining check is pure corruption defense — an absurd count (a corrupt/giant
+    // source day) or a settled row leaking in. A normal busy day (e.g. 50–80) passes freely. ──
+    var tooMany  = items.length > 200;
+    var settledLeak = items.some(function(it){ return it.entry && !_cdComputeUnalloc(it.entry); });
+    if(tooMany || settledLeak){
       if(typeof _logOp === 'function') _logOp('cd_auto_blocked', '自动带入被拦下（'+items.length+' 笔，疑似异常），未写入');
-      try { alert('⚠️ 自动带入发现异常\n\n准备带入 '+items.length+' 笔'+(wholeDay?'（几乎把一整天都带了）':'')+'，很可能不对，已暂停、没有写入。\n\n请点「带入 / 🔍 核对带入」自己核对后再手动带入。'); } catch(e){}
+      try { alert('⚠️ 自动带入发现异常\n\n准备带入 '+items.length+' 笔，很可能不对，已暂停、没有写入。\n\n请点「带入 / 🔍 核对带入」自己核对后再手动带入。'); } catch(e){}
       if(typeof updateCDBadge === 'function') updateCDBadge();
-      return;   // do NOT auto-write
+      return;   // do NOT auto-write, and do NOT mark done → retry next open (after data/fix)
     }
+    localStorage.setItem('mg_autocarry_date', todayKey);   // passed checks → mark done for today
 
     var added = items.map(function(it, iIdx){
       var src = it.entry, info = it.info;
