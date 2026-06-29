@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260629112030 -->
+<!-- MG Fishery Contra System v20260629112557 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260629112030';  /*BUILD*/
+window.__APP_VER__ = '20260629112557';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -5387,6 +5387,7 @@ function confirmCD(){
     return;
   }
   localStorage.setItem('mg_last_write', Date.now().toString());
+  if(typeof _bumpAction === 'function') _bumpAction();   // legitimate operator action → not a watchdog "ghost"
   if(typeof saveLocalSnapshot === 'function') saveLocalSnapshot();
   if(typeof markUnsaved === 'function') markUnsaved();
   if(typeof _logOp === 'function') _logOp('cd_import', '带入 '+added.length+' 条 C/D（'+added.map(function(e){return e.name.replace(/\s*\[C\/D fr [^\]]+\]/,'');}).slice(0,3).join('、')+(added.length>3?' 等':'')+'）', { snap: _cdBefore });
@@ -6927,7 +6928,7 @@ function exportPDF(printMode){
   const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260629112030 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260629112557 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
