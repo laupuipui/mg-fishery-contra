@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260629112557 -->
+<!-- MG Fishery Contra System v20260630010754 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260629112557';  /*BUILD*/
+window.__APP_VER__ = '20260630010754';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -3976,12 +3976,19 @@ function deleteEntry(id){
   if(!confirm(t('del_confirm')+': '+entries[idx].name)) return;
   if(typeof _logOp==='function') _logOp('delete', '删除客户：'+entries[idx].name, {snap: entries});
   pushUndo();
-  var _delId = entries[idx]._id;
+  var _delEntry = entries[idx];          // capture before splice (for source-dismiss)
+  var _delId = _delEntry._id;
   // R10 intent marker: record the id we're deleting so the watchdog can verify the
   // delete actually took effect (and re-apply / alert if the row is still there).
   try { localStorage.setItem('mg_lastdel', JSON.stringify({ at:Date.now(), ids:[_delId] })); } catch(e){}
   entries.splice(idx,1);
   if(_delId) _addTombstones([_delId]);   // deletion sticks across devices
+  // If this was a carried-in (C/D) row, dismiss its SOURCE too — otherwise the idempotent
+  // auto-carry would just bring it back on the next open/sync. Deleting it = "I don't want it".
+  if(_delEntry && _delEntry.isCD && _delEntry.cdSource && typeof _cdDismiss==='function'){
+    var _sref=[]; if(_delEntry.cdSource.id) _sref.push('id:'+_delEntry.cdSource.id); if(_delEntry.cdSource.sig) _sref.push('sig:'+_delEntry.cdSource.sig);
+    if(_sref.length) _cdDismiss(_sref);
+  }
   saveEntries(); renderAll();
 }
 
@@ -5420,11 +5427,13 @@ function confirmCD(){
 // Offline / not-logged-in: an init fallback timer fires it once rotation is done.
 var _mgRotationDone = false;
 var _mgFirstPullDone = false;
-var _mgAutoCarryRan = false;
+var _mgAutoCarryRan = false;   // kept for diagnostics; no longer gates anything
 function _maybeAutoCarry(viaFallback){
-  if(_mgAutoCarryRan) return;
   if(!_mgRotationDone) return;                          // wait until today's chart exists
   if(!_mgFirstPullDone && !viaFallback) return;         // wait for the first Drive pull (or the offline fallback)
+  // Re-entrant BY DESIGN: auto-carry is idempotent (only adds yesterday's still-outstanding rows
+  // that aren't already in today). So we run it on open AND after EVERY sync — a row whose data
+  // arrives in a later sync still gets carried, instead of being missed for the whole day.
   _mgAutoCarryRan = true;
   try { if(typeof _autoCarryCD === 'function') _autoCarryCD(); } catch(e){ console.warn('auto-carry failed:', e); }
 }
@@ -5438,14 +5447,16 @@ function _autoCarryCD(force){
     // Only when working on TODAY (never while editing a past day / viewing history).
     if(currentChartName && currentChartName.trim() !== todayName) return;
     var todayKey = _dayKey();   // LOCAL business day
-    var acDate = localStorage.getItem('mg_autocarry_date') || '';
-    if(acDate === todayKey && !force) return;     // already auto-carried today
+    // IDEMPOTENT — no once-per-day lock. _cdBuildItems(null) already excludes rows that are
+    // already in today (carried-into-today set) or dismissed, so re-running only ever ADDS
+    // yesterday's still-outstanding rows. Safe to run on every open and after every sync, which
+    // is what makes a late-arriving outstanding row reliably land instead of being missed.
     // Clean-start gate: only carry forward sources dated on/after the CD start day, so the
     // messy pre-start history is never pulled in.
     var startKey = (typeof _cdStartKey==='function') ? _cdStartKey() : '1970-01-01';
     var items = (typeof _cdBuildItems === 'function') ? _cdBuildItems(null) : [];
     items = items.filter(function(it){ var dk=''; try{ dk=_dayKey(it.chartDate); }catch(_){}; return dk && dk>=startKey; });
-    if(!items.length){ localStorage.setItem('mg_autocarry_date', todayKey); return; }   // nothing to carry → done for today
+    if(!items.length) return;   // nothing outstanding to carry (or everything already in today)
 
     // ── Anomaly guard: we now read ONLY the previous day, so the old "accumulated 100+" can't
     // happen. The remaining check is pure corruption defense — an absurd count (a corrupt/giant
@@ -5456,9 +5467,8 @@ function _autoCarryCD(force){
       if(typeof _logOp === 'function') _logOp('cd_auto_blocked', '自动带入被拦下（'+items.length+' 笔，疑似异常），未写入');
       try { alert('⚠️ 自动带入发现异常\n\n准备带入 '+items.length+' 笔，很可能不对，已暂停、没有写入。\n\n请点「带入 / 🔍 核对带入」自己核对后再手动带入。'); } catch(e){}
       if(typeof updateCDBadge === 'function') updateCDBadge();
-      return;   // do NOT auto-write, and do NOT mark done → retry next open (after data/fix)
+      return;   // do NOT auto-write; retry next open / sync (after data/fix)
     }
-    localStorage.setItem('mg_autocarry_date', todayKey);   // passed checks → mark done for today
 
     var added = items.map(function(it, iIdx){
       var src = it.entry, info = it.info;
@@ -6928,7 +6938,7 @@ function exportPDF(printMode){
   const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260629112557 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260630010754 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
@@ -9435,8 +9445,12 @@ function batchDelete(){
   pushUndo();
   var _delIds = Array.from(_batchSelected);
   try { localStorage.setItem('mg_lastdel', JSON.stringify({ at:Date.now(), ids:_delIds })); } catch(e){}  // R10 intent
+  // Dismiss the SOURCE of any carried-in rows being deleted, so auto-carry won't bring them back.
+  var _delSrefs=[];
+  entries.forEach(function(e){ if(e && _batchSelected.has(e._id) && e.isCD && e.cdSource){ if(e.cdSource.id) _delSrefs.push('id:'+e.cdSource.id); if(e.cdSource.sig) _delSrefs.push('sig:'+e.cdSource.sig); } });
   entries = entries.filter(function(e){ return !_batchSelected.has(e._id); });
   _addTombstones(_delIds);   // deletions stick across devices
+  if(_delSrefs.length && typeof _cdDismiss==='function') _cdDismiss(_delSrefs);
   _batchSelected.clear();
   document.getElementById('batch-bar').classList.add('hidden');
   saveEntries(); renderAll();
