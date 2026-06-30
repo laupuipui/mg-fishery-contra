@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260630095242 -->
+<!-- MG Fishery Contra System v20260630232220 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260630095242';  /*BUILD*/
+window.__APP_VER__ = '20260630232220';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -851,7 +851,10 @@ body.fs-lg .alloc-input{font-size:14px}
     <h2 data-i="history_title">📁 历史记录</h2>
     <input type="text" id="hist-search" placeholder="搜索名称..." oninput="filterHistory()">
     <div id="history-list" style="max-height:360px;overflow-y:auto;margin-bottom:14px"></div>
-    <div class="btn-row"><button class="btn-secondary" onclick="closeModal('modal-history')" data-i="cancel">取消</button></div>
+    <div class="btn-row">
+      <button class="btn-secondary" onclick="backupRecentDaysNow()" title="把前两天(昨天+前天)的表格下载成 Excel 备份">📥 备份前两天</button>
+      <button class="btn-secondary" onclick="closeModal('modal-history')" data-i="cancel">取消</button>
+    </div>
   </div>
 </div>
 
@@ -2910,6 +2913,9 @@ function saveEntries(skipSnapshot){
   _persistCurrentChart();          // per-operation chart save — entries never diverge from its chart
   if(!skipSnapshot) _saveLocalSnapshotDebounced();   // recovery snapshot — debounced (perf; was per-click 3MB)
   _pushToDrive();
+  // If editing a recent PAST day (yesterday/day-before), queue a "_new" backup. Cheap: the
+  // today-check returns immediately for the normal case (editing today), so no hot-path cost.
+  if(typeof _maybeQueueEditedDayBackup === 'function') _maybeQueueEditedDayBackup();
   // Bound chart is now in sync with entries → mark saved (button shows ✅).
   if(typeof markSaved === 'function') markSaved();
   return ok;  // false if localStorage write failed (quota) — callers can react
@@ -6943,7 +6949,7 @@ function exportPDF(printMode){
   const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260630095242 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260630232220 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
@@ -6972,14 +6978,13 @@ td,th{border:1px solid #ccc;padding:3px 6px;white-space:nowrap}
   }
 }
 
-function exportExcel(){
-  if(typeof XLSX==='undefined'){ alert('XLSX library not loaded'); return; }
-  const now=new Date();
-  const todayDs = `${now.getDate()}-${now.getMonth()+1}-${now.getFullYear()}`;
-  const ds = (typeof currentChartName === 'string' && currentChartName.trim()) ? currentChartName.trim().replace(/\//g,'-') : todayDs;
+// Build the Contra workbook (one sheet per bank group, with the Balance column) from ANY entries
+// array. Reused by the manual export AND the auto-backup downloader (so a past day can be exported
+// without disturbing the current view).
+function _contraWorkbook(srcEntries){
   const wb=XLSX.utils.book_new();
   BANK_GROUPS.forEach(grp=>{
-    const ge=entries.filter(e=>e.group===grp&&!e.hidden);
+    const ge=(srcEntries||[]).filter(e=>e&&e.group===grp&&!e.hidden);
     if(!ge.length) return;
     const isRP=grp==='RP';
     const isTHBgrp=grp==='THB';
@@ -6991,18 +6996,14 @@ function exportExcel(){
       const rm=e.rmAmount||0;
       const isTHBe=e.group==='THB';
       const dispAmt=isRP?e.amount:isTHBe?(e.amount||e.rmAmount||0):rm;
-      const dispCur=isRP?(e.currency||'IDR/SGD'):isTHBe?'THB':'RM';
       const bal=isRP?((e.amount||0)-((e.btHeng||0)+(e.yes||0)+(e.hs||0)+(e.cash||0))):
                 isTHBe?((e.amount||0)-((e.act||0)+(e.yes||0)+(e.hs||0)+(e.cash||0))):
                 (rm-((e.act||0)+(e.yes||0)+(e.hs||0)+(e.cash||0)));
-      const balDisp=Math.abs(bal)<0.01?'✓':bal.toFixed(2);
       aoa.push([no++,e.name,e.bank,e.account,dispAmt,isRP?(e.btHeng||''):(e.act||''),e.yes||'',e.hs||'',e.cash||'',e.owner||'',Math.abs(bal)<0.005?'✓':bal]);
-      // Group total: THB & RP use native amount, others use rmAmount
       if(isRP) tot += e.amount||0;
       else if(isTHBe) tot += e.amount||0;
       else tot += rm;
     });
-    // TOTAL row with proper sums per column
     var totACT=0,totYES=0,totHS=0,totCASH=0;
     ge.forEach(function(e){
       totACT  += isRP ? (e.btHeng||0) : (e.act||0);
@@ -7015,7 +7016,90 @@ function exportExcel(){
     ws['!cols']=[{wch:4},{wch:36},{wch:8},{wch:16},{wch:12},{wch:10},{wch:10},{wch:10},{wch:10},{wch:10},{wch:8}];
     XLSX.utils.book_append_sheet(wb,ws,grp);
   });
-  XLSX.writeFile(wb,`Contra_${ds}.xlsx`);
+  return wb;
+}
+function exportExcel(){
+  if(typeof XLSX==='undefined'){ alert('XLSX library not loaded'); return; }
+  const now=new Date();
+  const todayDs = `${now.getDate()}-${now.getMonth()+1}-${now.getFullYear()}`;
+  const ds = (typeof currentChartName === 'string' && currentChartName.trim()) ? currentChartName.trim().replace(/\//g,'-') : todayDs;
+  XLSX.writeFile(_contraWorkbook(entries), `Contra_${ds}.xlsx`);
+}
+
+// ======================================================
+// AUTO-BACKUP — download the previous 2 days' Excel once per day, as an off-device safety copy.
+// Browsers BLOCK downloads that aren't tied to a user gesture, so we QUEUE the downloads on open
+// and flush them on the first real click/keypress of the session (a genuine gesture). The first
+// time, the browser asks "allow multiple downloads?" — allow once and it's remembered.
+// ======================================================
+var _backupQueue = {};   // key (chartName|suffix) → {chart, suffix} — deduped so rapid edits don't pile up
+function _downloadChartBackup(chart, suffix){
+  try {
+    if(typeof XLSX==='undefined' || !chart || !Array.isArray(chart.entries) || !chart.entries.length) return;
+    var nm = String(chart.name || _dayKey(chart.date)).trim().replace(/\//g,'-');
+    XLSX.writeFile(_contraWorkbook(chart.entries), 'Contra_'+nm+(suffix||'')+'.xlsx');
+  } catch(e){ console.warn('backup download failed:', e); }
+}
+function _queueBackup(chart, suffix){
+  if(!chart) return;
+  var nm = String(chart.name || _dayKey(chart.date)).trim();
+  _backupQueue[nm+'|'+(suffix||'')] = { chart:chart, suffix:suffix||'' };
+}
+function _flushBackupQueue(){
+  var keys = Object.keys(_backupQueue);
+  if(!keys.length) return;
+  keys.forEach(function(k){ var j=_backupQueue[k]; delete _backupQueue[k]; _downloadChartBackup(j.chart, j.suffix); });
+}
+// Persistent: any user gesture flushes pending backups (no-op when empty). Capture phase so it
+// runs before app handlers, inside the gesture's user-activation window.
+if(typeof document!=='undefined'){
+  document.addEventListener('pointerdown', _flushBackupQueue, true);
+  document.addEventListener('keydown', _flushBackupQueue, true);
+}
+// A chart's business day is its NAME (e.g. "29/6/2026") — NOT its `date` field, which
+// _persistCurrentChart rewrites to "now" on every save. So match recent days by name.
+function _dayNameForOffset(off){ try { return new Date(Date.now()-off*86400000).toLocaleDateString('en-MY',{day:'numeric',month:'numeric',year:'numeric'}); } catch(e){ return ''; } }
+function _chartForDayName(nm){
+  nm = String(nm||'').trim();
+  try { return (JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]')||[]).find(function(c){ return c && Array.isArray(c.entries) && (typeof _cdBaseDay==='function'?_cdBaseDay(c.name):String(c.name||'').trim())===nm; }) || null; }
+  catch(e){ return null; }
+}
+function _backupDoneMap(){ try { return JSON.parse(localStorage.getItem('mg_backup_done')||'{}')||{}; } catch(e){ return {}; } }
+function _isBackupDone(name){ var m=_backupDoneMap(), k=_dayKey(); return !!(m[k] && m[k].indexOf(name)>=0); }
+function _markBackupDone(name){ try { var m=_backupDoneMap(), k=_dayKey(); var keep={}; keep[k]=(m[k]||[]).slice(); if(keep[k].indexOf(name)<0) keep[k].push(name); localStorage.setItem('mg_backup_done', JSON.stringify(keep)); } catch(e){} }
+// On open: queue a once-per-day backup of YESTERDAY + the DAY BEFORE (never today — today is still
+// being worked on; it gets backed up tomorrow as "yesterday").
+function _autoBackupRecentDays(){
+  try {
+    [1,2].forEach(function(off){
+      var nm = _dayNameForOffset(off);
+      var c = _chartForDayName(nm);
+      if(!c || !(c.entries||[]).length) return;
+      if(_isBackupDone(nm)) return;          // already downloaded today → don't re-download on refresh
+      _queueBackup(c, '');
+      _markBackupDone(nm);
+    });
+  } catch(e){ console.warn('_autoBackupRecentDays failed:', e); }
+}
+// Manual fallback button — guaranteed download (it runs inside the click gesture).
+function backupRecentDaysNow(){
+  try {
+    var n=0;
+    [1,2].forEach(function(off){ var c=_chartForDayName(_dayNameForOffset(off)); if(c && (c.entries||[]).length){ _downloadChartBackup(c,''); n++; } });
+    if(typeof _showSuccessToast==='function') _showSuccessToast(n? ('已下载前两天备份 '+n+' 份') : '前两天没有可备份的表格');
+  } catch(e){ console.warn(e); }
+}
+// If the user EDITS a recent past day (yesterday / day-before) and saves, queue a fresh "_new"
+// backup of THAT day. Today's live editing never triggers this (today isn't part of "前两天").
+function _maybeQueueEditedDayBackup(){
+  try {
+    var cur = (currentChartName||'').trim();
+    if(!cur || cur===_todayDateStr()) return;   // editing today → skip (no per-keystroke downloads)
+    if(cur===_dayNameForOffset(1) || cur===_dayNameForOffset(2)){
+      var c = _chartForDayName(cur);
+      if(c) _queueBackup(c, '_new');
+    }
+  } catch(e){}
 }
 
 // ======================================================
@@ -10010,6 +10094,7 @@ function init(){
       _maybeAutoCarry();                             // if the first pull already landed, carry now
       setTimeout(function(){ _maybeAutoCarry(true); }, 6000);  // fallback: offline / no pull within 6s → carry anyway (once)
     }
+    if(typeof _autoBackupRecentDays === 'function') _autoBackupRecentDays();  // queue once-per-day backup of the previous 2 days (flushed on first click)
     _checkDailyExcelBackup();
     _checkDailyRatesReminder();
     _syncStatusSelfCorrect();
