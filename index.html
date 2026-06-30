@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260630010754 -->
+<!-- MG Fishery Contra System v20260630095242 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260630010754';  /*BUILD*/
+window.__APP_VER__ = '20260630095242';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -5052,10 +5052,12 @@ function _cdBaseDay(name){ return String(name||'').replace(/\s*\([^)]*\)\s*$/,''
 function _cdCustKey(e){ return String(e&&e.name||'').replace(/\s*\[C\/D[^\]]*\]/g,'').trim().toLowerCase()+'|'+(e&&e.account||'')+'|'+(e&&e.group||''); }
 function _cdAllocOf(e){ return Math.abs((e&&e.act||0)+(e&&e.yes||0)+(e&&e.hs||0)+(e&&e.cash||0)+(e&&e.btHeng||0)); }
 
-// Build ONE authoritative chart per DAY: collapse all copies of that day (including
-// "(恢复)" duplicates) and, per customer, keep the MOST-ALLOCATED (most settled) version.
-// This is the heart of the C/D fix — a settled customer can never be read back as unfinished
-// from a stale/blank copy. Cached by the raw mg_charts string (recompute only when it changes).
+// Build ONE authoritative chart per DAY: collapse all copies of that day (including "(恢复)"
+// duplicates). Dedupe by ENTRY _id (a true duplicate = the SAME transaction copied across chart
+// versions), keeping the MOST-ALLOCATED version. We must NOT dedupe by customer — a customer can
+// legitimately have TWO separate transactions in one day (e.g. a settled carried-in balance AND a
+// new unsettled delivery); merging by name+account would hide the unsettled one from C/D.
+// Cached by the raw mg_charts string (recompute only when it changes).
 var _cdCanonCache = { raw:null, val:null };
 function _cdCanonicalCharts(){
   var raw = localStorage.getItem(CHARTS_KEY)||'[]';
@@ -5072,7 +5074,10 @@ function _cdCanonicalCharts(){
     copies.forEach(function(c){
       (c.entries||[]).forEach(function(e){
         if(!e) return;
-        var k=_cdCustKey(e), cur=best[k];
+        // Key by _id so DIFFERENT transactions of the same customer are both kept; only true
+        // copies (same _id across chart versions) collapse. No-_id rows never merge.
+        var k = e._id ? ('id:'+e._id) : ('noid:'+order.length);
+        var cur=best[k];
         if(!cur){ best[k]=e; order.push(k); return; }
         var ae=_cdAllocOf(e), ac=_cdAllocOf(cur);
         if(ae>ac || (ae===ac && (e.updatedAt||0)>(cur.updatedAt||0))) best[k]=e;   // most-settled wins
@@ -6938,7 +6943,7 @@ function exportPDF(printMode){
   const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260630010754 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260630095242 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
