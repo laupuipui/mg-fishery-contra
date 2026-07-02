@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260702121430 -->
+<!-- MG Fishery Contra System v20260702122842 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260702121430';  /*BUILD*/
+window.__APP_VER__ = '20260702122842';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -6981,7 +6981,7 @@ function exportPDF(printMode){
   const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260702121430 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260702122842 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
@@ -9745,6 +9745,10 @@ function renderHistoryList(charts){
     el.innerHTML = '<div style="text-align:center;color:var(--text3);padding:24px" data-i="history_empty">'+t('history_empty')+'</div>';
     return;
   }
+  // Sort by the BUSINESS DAY (parsed from the chart name), newest first — NOT by `date`, which
+  // _persistCurrentChart rewrites to "now" on every save (so editing an old day made it jump).
+  var _cdt = function(c){ try{ return (typeof _custChartDate==='function') ? _custChartDate(c).getTime() : (c.date?new Date(c.date).getTime():0); }catch(_){ return 0; } };
+  charts = charts.slice().sort(function(a,b){ return _cdt(b) - _cdt(a); });
   el.innerHTML = charts.map(function(c,i){
     // Identify charts by their stable id (NOT array index) — mg_charts gets
     // re-sorted asynchronously by Drive sync, so a positional index can point
@@ -9754,7 +9758,7 @@ function renderHistoryList(charts){
     return '<div class="hist-item">' +
       '<div class="hist-info">' +
         '<div class="hist-name">'+c.name+'</div>' +
-        '<div class="hist-meta">'+new Date(c.date).toLocaleString('en-MY')+' · '+c.entries.length+' entries · RM '+fmtN(gRM)+'</div>' +
+        '<div class="hist-meta">'+c.entries.length+' entries · RM '+fmtN(gRM)+' · <span style="color:var(--text3)">编辑于 '+new Date(c.date).toLocaleString('en-MY')+'</span></div>' +
       '</div>' +
       '<button class="tb-btn teal" onclick="viewChartReadonly(\''+cid+'\')">📖 '+(isEng?'View':'查看')+'</button>' +
       '<button class="tb-btn" onclick="viewChartCustomers(\''+cid+'\')" style="color:var(--pbb);border-color:rgba(168,127,255,.3)" title="客户历史">👤</button>' +
