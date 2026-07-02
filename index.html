@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260630232220 -->
+<!-- MG Fishery Contra System v20260702121430 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260630232220';  /*BUILD*/
+window.__APP_VER__ = '20260702121430';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -1199,14 +1199,17 @@ body.fs-lg .alloc-input{font-size:14px}
 
 <!-- CUSTOMER HISTORY MODAL -->
 <div id="modal-cust-hist" class="modal-overlay hidden">
-  <div class="modal wide" style="max-width:560px">
+  <div class="modal wide" style="max-width:920px">
     <h2 id="cust-hist-title">客户交易历史</h2>
-    <div id="cust-hist-body" style="max-height:420px;overflow-y:auto"></div>
+    <div id="cust-hist-body" style="max-height:70vh;overflow:auto"></div>
     <div class="btn-row"><button class="btn-secondary" onclick="closeModal('modal-cust-hist')">关闭</button></div>
   </div>
 </div>
 <!-- XLSX -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<!-- jsPDF + html2canvas (PDF / image export of customer history) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script charset="utf-8">
 // (Removed unused firebaseConfig — the Firebase SDK was never loaded; sync uses Google Drive only.)
 
@@ -3458,7 +3461,8 @@ function renderAll(){
         +(isSGDpend?`<span class="sgd-pending-badge">SGD⏳</span>`:'');
 
       const tr=document.createElement('tr');
-      tr.className=(rowCls||'')+(isHidden?' hidden-entry':'');
+      var _selNow = (typeof _batchSelected!=='undefined' && _batchSelected.has(entry._id));   // preserve batch selection across re-renders
+      tr.className=(rowCls||'')+(isHidden?' hidden-entry':'')+(_selNow?' batch-selected':'');
       tr.setAttribute('data-entry-id', entry._id);
       tr.dataset.gi = gi;
       // Batch mode: clicking the row toggles selection
@@ -3473,7 +3477,7 @@ function renderAll(){
         });
       })(entry._id);
       tr.innerHTML=`
-        <td class="batch-only-col"><input type="checkbox" class="row-sel batch-cb" data-entry-id="${entry._id}" onchange="updateBatchBar();this.closest('tr').classList.toggle('batch-selected', this.checked)"></td>
+        <td class="batch-only-col"><input type="checkbox" class="row-sel batch-cb" data-entry-id="${entry._id}" ${_selNow?'checked':''} onchange="updateBatchBar();this.closest('tr').classList.toggle('batch-selected', this.checked)"></td>
         <td>${no++}</td>
         <td>${nameDisp}</td>
         <td><span style="font-size:10px;font-weight:700;color:${BANK_COLORS[group]||'#aaa'}">${entry.bank}</span></td>
@@ -5056,6 +5060,9 @@ function _cdChartAllocTotal(c){
 function _cdBaseDay(name){ return String(name||'').replace(/\s*\([^)]*\)\s*$/,'').trim(); }
 // Customer identity within a day (name without the C/D tag + account + group).
 function _cdCustKey(e){ return String(e&&e.name||'').replace(/\s*\[C\/D[^\]]*\]/g,'').trim().toLowerCase()+'|'+(e&&e.account||'')+'|'+(e&&e.group||''); }
+// Customer + amount — a TRANSACTION identity. Two rows with this same key are the SAME deal
+// (e.g. a real worked row + a blank cross-device copy). Different amounts = different deals (kept).
+function _cdCustAmtKey(e){ return _cdCustKey(e)+'|'+Math.round(((e&&e.amount)||0)*100); }
 function _cdAllocOf(e){ return Math.abs((e&&e.act||0)+(e&&e.yes||0)+(e&&e.hs||0)+(e&&e.cash||0)+(e&&e.btHeng||0)); }
 
 // Build ONE authoritative chart per DAY: collapse all copies of that day (including "(恢复)"
@@ -5089,7 +5096,15 @@ function _cdCanonicalCharts(){
         if(ae>ac || (ae===ac && (e.updatedAt||0)>(cur.updatedAt||0))) best[k]=e;   // most-settled wins
       });
     });
-    out.push(Object.assign({}, primary, { name: day, entries: order.map(function(k){ return best[k]; }) }));
+    var entries0 = order.map(function(k){ return best[k]; });
+    // Drop stale BLANK duplicates: an alloc=0 row whose (customer+amount) ALSO appears WITH
+    // allocations is a leftover/cross-device copy of an already-worked deal — keep the worked one.
+    // Genuine same-customer DIFFERENT-amount rows (SOON HAI SENG) → different keys → both kept.
+    // A group that's entirely blank (no allocated sibling) is kept intact (real unsettled rows).
+    var maxA = {};
+    entries0.forEach(function(e){ var ck=_cdCustAmtKey(e), a=_cdAllocOf(e); if(a > (maxA[ck]||0)) maxA[ck]=a; });
+    var kept = entries0.filter(function(e){ return _cdAllocOf(e) > 0 || (maxA[_cdCustAmtKey(e)]||0) === 0; });
+    out.push(Object.assign({}, primary, { name: day, entries: kept }));
   });
   _cdCanonCache.raw = raw; _cdCanonCache.val = out;
   return out;
@@ -5109,7 +5124,7 @@ function _cdSettledIds(){
 // hidden just because some OTHER day's entry references it.
 function _cdCarriedIntoTodaySet(){
   var set = {};
-  function scan(list){ (list||[]).forEach(function(e){ if(e && e.cdSource){ if(e.cdSource.id) set['id:'+e.cdSource.id]=1; if(e.cdSource.sig) set['sig:'+e.cdSource.sig]=1; } }); }
+  function scan(list){ (list||[]).forEach(function(e){ if(e && e.cdSource){ if(e.cdSource.id) set['id:'+e.cdSource.id]=1; if(e.cdSource.sig) set['sig:'+e.cdSource.sig]=1; if(e.cdSource.srcKey) set['sk:'+e.cdSource.srcKey]=1; } }); }
   try { scan(entries); } catch(_){}
   try { var ts=_todayDateStr(); _cdCanonicalCharts().forEach(function(c){ if(c && _cdBaseDay(c.name)===ts) scan(c.entries); }); } catch(_){}
   return set;
@@ -5152,7 +5167,7 @@ function _cdBuildItems(filterChartId){
       if(!e || e.hidden || e.cdHidden) return;
       var idRef  = _cdSrcRef(e);             // 'id:..' or 'sig:..'
       var sigRef = 'sig:' + _cdSig(e);
-      if(carried[idRef] || carried[sigRef]) return;     // already carried into today
+      if(carried[idRef] || carried[sigRef] || carried['sk:'+_cdCustAmtKey(e)]) return;  // already carried into today (any device, by customer+amount)
       if(dismissed[idRef] || dismissed[sigRef]) return; // user removed it
       var info = _cdComputeUnalloc(e);
       if(!info) return;                                  // settled → skip
@@ -5379,7 +5394,7 @@ function confirmCD(){
       isCD: true,
       // Carry-link back to the source — this is how "already carried" is detected.
       // If this entry is later deleted/cleared, the source auto-reappears in C/D.
-      cdSource: { id: src._id || null, sig: _cdSig(src), chartId: it.chartId, date: it.chartDate },
+      cdSource: { id: src._id || null, sig: _cdSig(src), srcKey: _cdCustAmtKey(src), chartId: it.chartId, date: it.chartDate },
       act: 0, yes: 0, hs: 0, cash: 0, btHeng: 0
     };
     if(newEntry.currency === 'SGD'){
@@ -5439,9 +5454,26 @@ function confirmCD(){
 var _mgRotationDone = false;
 var _mgFirstPullDone = false;
 var _mgAutoCarryRan = false;   // kept for diagnostics; no longer gates anything
+var _mgCarryRetry = null;
+// Don't disrupt the operator mid-action: a modal open, an input focused, or batch-select mode
+// active means auto-carry's renderAll would wipe what they're doing (e.g. batch checkboxes).
+function _mgBusy(){
+  try {
+    if(typeof _batchMode !== 'undefined' && _batchMode) return true;
+    if(document.querySelector('.modal-overlay:not(.hidden)')) return true;
+    var ae = document.activeElement;
+    if(ae && (ae.tagName==='INPUT'||ae.tagName==='SELECT'||ae.tagName==='TEXTAREA')) return true;
+  } catch(_){}
+  return false;
+}
 function _maybeAutoCarry(viaFallback){
   if(!_mgRotationDone) return;                          // wait until today's chart exists
   if(!_mgFirstPullDone && !viaFallback) return;         // wait for the first Drive pull (or the offline fallback)
+  if(_mgBusy()){                                        // operator is busy → try again shortly, don't disrupt
+    if(_mgCarryRetry) clearTimeout(_mgCarryRetry);
+    _mgCarryRetry = setTimeout(function(){ _mgCarryRetry=null; _maybeAutoCarry(true); }, 4000);
+    return;
+  }
   // Re-entrant BY DESIGN: auto-carry is idempotent (only adds yesterday's still-outstanding rows
   // that aren't already in today). So we run it on open AND after EVERY sync — a row whose data
   // arrives in a later sync still gets carried, instead of being missed for the whole day.
@@ -5494,7 +5526,7 @@ function _autoCarryCD(force){
         bank: src.bank, account: src.account, group: src.group, owner: src.owner || '',
         currency: src.currency || (src.group==='RP'?'IDR':src.group==='THB'?'THB':'RM'),
         amount: info.remaining, isCD: true, cdLive: true,
-        cdSource: { id: src._id || null, sig: _cdSig(src), chartId: it.chartId, date: it.chartDate },
+        cdSource: { id: src._id || null, sig: _cdSig(src), srcKey: _cdCustAmtKey(src), chartId: it.chartId, date: it.chartDate },
         act:0, yes:0, hs:0, cash:0, btHeng:0
       };
       if(ne.currency === 'SGD'){ ne.rmAmount = 0; ne.sgdPending = true; ne.sgdAmount = info.remaining; }
@@ -6949,7 +6981,7 @@ function exportPDF(printMode){
   const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260630232220 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260702121430 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
@@ -9966,52 +9998,152 @@ function _custHistRender(val){
 }
 
 // Show full history for an exact customer name
-function _showCustHistoryFor(custName){
-  var title = document.getElementById('cust-hist-title');
-  var body  = document.getElementById('cust-hist-body');
-  if(!body) return;
-  var canonical = (custName||'').replace(/\s*\[C\/D fr [^\]]+\]/g,'').trim().toUpperCase();
-  var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
-  var results = [];
+// ═══ Customer history v2 — a clear ledger: when, how much, allocated to whom, settled or not,
+//     with a time-range filter and Excel / PDF / image export. ═══
+var _custHist = { name:'', from:'', to:'' };
+function _custEntryBalance(e){
+  if(!e) return 0;
+  if(e.group==='RP')  return (e.amount||0) - ((e.btHeng||0)+(e.yes||0)+(e.hs||0)+(e.cash||0));
+  if(e.group==='THB') return (e.amount||0) - ((e.act||0)+(e.yes||0)+(e.hs||0)+(e.cash||0));
+  return (e.rmAmount||0) - ((e.act||0)+(e.yes||0)+(e.hs||0)+(e.cash||0));
+}
+function _custEntrySettled(e){ var t=(e&&e.group==='RP')?0.5:0.005; return Math.abs(_custEntryBalance(e))<=t; }
+// A chart's business day comes from its NAME ("d/m/yyyy"), not its rewritten `date` field.
+function _custChartDate(c){
+  try { var m=String(c&&c.name||'').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); if(m) return new Date(+m[3],+m[2]-1,+m[1]); } catch(_){}
+  try { return new Date(c.date); } catch(_){ return new Date(0); }
+}
+function _custHistAmt(e){ return (e.group==='RP'||e.group==='THB')?(e.amount||0):(e.rmAmount||0); }
+function _custHistCur(e){ return e.group==='RP'?(e.currency||'IDR'):e.group==='THB'?'THB':'RM'; }
+// All of a customer's transactions (each entry = one row), newest first, within [from,to].
+function _custHistCollect(custName, from, to){
+  var canonical=(custName||'').replace(/\s*\[C\/D fr [^\]]+\]/g,'').trim().toUpperCase();
+  var charts=(typeof _cdCanonicalCharts==='function') ? _cdCanonicalCharts() : JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
+  var fromT=from?new Date(from+'T00:00:00').getTime():-Infinity;
+  var toT  =to  ?new Date(to+'T23:59:59').getTime()  : Infinity;
+  var rows=[];
   charts.forEach(function(c){
-    if(!Array.isArray(c.entries)) return;
-    var found = c.entries.filter(function(e){
-      if(!e || !e.name) return false;
-      var canon = e.name.replace(/\s*\[C\/D fr [^\]]+\]/g,'').trim().toUpperCase();
-      return canon === canonical;
+    if(!c||!Array.isArray(c.entries)) return;
+    var cd=_custChartDate(c).getTime();
+    if(cd<fromT||cd>toT) return;
+    c.entries.forEach(function(e){
+      if(!e||!e.name) return;
+      if(e.name.replace(/\s*\[C\/D fr [^\]]+\]/g,'').trim().toUpperCase()!==canonical) return;
+      rows.push({ chart:c, e:e, t:cd });
     });
-    if(found.length) results.push({chart:c, entries:found});
   });
-
-  if(title) title.textContent = '📋 '+custName;
-  var backBtn = '<div style="margin-bottom:10px"><button class="btn-secondary" onclick="openCustomerHistory(\'\')" style="font-size:12px;padding:6px 12px">← '+(isEng?'New search':'重新搜索')+'</button></div>';
-  if(!results.length){
-    body.innerHTML = backBtn + '<div style="text-align:center;color:var(--text3);padding:20px">'+
-      (isEng?'No history found for this customer':'暂无历史记录')+'</div>';
-  } else {
-    body.innerHTML = backBtn + results.map(function(r){
-      var e = r.entries[0];
-      var amt;
-      if(e.group==='RP'){
-        amt = e.currency==='IDR' ? 'IDR '+(Number(e.amount)||0).toLocaleString() : 'SGD '+fmtN(e.amount);
-      } else if(e.group==='THB'){
-        amt = e.currency==='SGD' ? 'SGD '+fmtN(e.amount) : 'THB '+fmtN(e.amount||0);
-      } else {
-        amt = fmtRM(e.rmAmount||0);
-      }
-      var dateStr = '';
-      try { dateStr = new Date(r.chart.date).toLocaleDateString('en-MY'); } catch(_){}
-      return '<div style="padding:10px;border-bottom:1px solid var(--border);display:flex;gap:12px;align-items:center;flex-wrap:wrap">' +
-        '<div style="flex:1;min-width:120px">' +
-          '<div style="font-size:13px;font-weight:700">'+r.chart.name+'</div>' +
-          '<div style="font-size:10px;color:var(--text3);font-family:monospace;margin-top:2px">'+dateStr+'</div>' +
-        '</div>' +
-        '<div style="font-family:monospace;font-size:13px;color:var(--accent)">'+amt+'</div>' +
-        '<div style="font-size:11px;color:var(--text2)">'+(e.owner||'')+'</div>' +
-        '</div>';
-    }).join('');
-  }
+  rows.sort(function(a,b){ return b.t - a.t; });
+  return rows;
+}
+function _showCustHistoryFor(custName){
+  var title=document.getElementById('cust-hist-title'), body=document.getElementById('cust-hist-body');
+  if(!body) return;
+  _custHist = { name:custName, from:'', to:'' };
+  if(title) title.textContent='📋 '+custName;
+  var S='background:var(--surface2);border:1.5px solid var(--border2);color:var(--text);padding:5px 8px;border-radius:6px;font-size:12px';
+  var pb='font-size:11px;padding:5px 9px';
+  body.innerHTML =
+    '<div style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
+      '<button class="btn-secondary" onclick="openCustomerHistory(\'\')" style="font-size:12px;padding:6px 12px">← 重新搜索</button>' +
+      '<span style="font-size:12px;color:var(--text2)">时间：</span>' +
+      '<input type="date" id="ch-from" onchange="_custHistApplyRange()" style="'+S+'">' +
+      '<span style="color:var(--text3)">→</span>' +
+      '<input type="date" id="ch-to" onchange="_custHistApplyRange()" style="'+S+'">' +
+      '<button class="btn-secondary" onclick="_custHistPreset(7)" style="'+pb+'">近7天</button>' +
+      '<button class="btn-secondary" onclick="_custHistPreset(30)" style="'+pb+'">近30天</button>' +
+      '<button class="btn-secondary" onclick="_custHistPreset(0)" style="'+pb+'">全部</button>' +
+    '</div>' +
+    '<div style="margin-bottom:10px;display:flex;gap:8px;flex-wrap:wrap">' +
+      '<button onclick="_custHistExportExcel()" style="font-size:12px;padding:7px 13px;border-radius:8px;border:none;background:#059669;color:#fff;font-weight:700;cursor:pointer">📊 Excel</button>' +
+      '<button onclick="_custHistExportPDF()" style="font-size:12px;padding:7px 13px;border-radius:8px;border:none;background:#dc2626;color:#fff;font-weight:700;cursor:pointer">📄 PDF</button>' +
+      '<button onclick="_custHistExportImage()" style="font-size:12px;padding:7px 13px;border-radius:8px;border:none;background:#7c3aed;color:#fff;font-weight:700;cursor:pointer">🖼 图片</button>' +
+    '</div>' +
+    '<div id="ch-table-wrap" style="overflow:auto"></div>';
+  _custHistRenderTable();
   document.getElementById('modal-cust-hist').classList.remove('hidden');
+}
+function _custHistApplyRange(){
+  _custHist.from=((document.getElementById('ch-from')||{}).value)||'';
+  _custHist.to  =((document.getElementById('ch-to')||{}).value)||'';
+  _custHistRenderTable();
+}
+function _custHistPreset(days){
+  function iso(d){ return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2); }
+  var f=document.getElementById('ch-from'), t=document.getElementById('ch-to');
+  if(days>0){ if(f)f.value=iso(new Date(Date.now()-(days-1)*86400000)); if(t)t.value=iso(new Date()); }
+  else { if(f)f.value=''; if(t)t.value=''; }
+  _custHistApplyRange();
+}
+function _custHistRenderTable(){
+  var wrap=document.getElementById('ch-table-wrap'); if(!wrap) return;
+  var rows=_custHistCollect(_custHist.name,_custHist.from,_custHist.to);
+  if(!rows.length){ wrap.innerHTML='<div style="text-align:center;color:var(--text3);padding:24px">该时间区间内暂无记录</div>'; return; }
+  var totAmt=0,totAlloc=0,totBal=0,nSettled=0;
+  function num(v){ return v?fmtN(v):'<span style="color:var(--text3)">·</span>'; }
+  var TD='padding:6px 8px;border-bottom:1px solid var(--border);font-size:12px';
+  var trs=rows.map(function(r){
+    var e=r.e, amt=_custHistAmt(e), alloc=(e.act||0)+(e.yes||0)+(e.hs||0)+(e.cash||0)+(e.btHeng||0), bal=_custEntryBalance(e), settled=_custEntrySettled(e);
+    totAmt+=amt; totAlloc+=alloc; totBal+=bal; if(settled)nSettled++;
+    var isCD=/\[C\/D fr/.test(e.name||'');
+    return '<tr style="'+(settled?'':'background:rgba(255,61,82,.07)')+'">'+
+      '<td style="'+TD+';white-space:nowrap">'+(r.chart.name||'')+(isCD?' <span style="font-size:9px;color:var(--yellow)">↩带入</span>':'')+'</td>'+
+      '<td style="'+TD+'">'+(e.bank||'')+'</td>'+
+      '<td style="'+TD+';font-family:monospace;font-size:11px">'+fmtAcct(e.account||'')+'</td>'+
+      '<td style="'+TD+'">'+(e.owner||'')+'</td>'+
+      '<td style="'+TD+';text-align:right;font-family:monospace;font-weight:700;white-space:nowrap">'+_custHistCur(e)+' '+fmtN(amt)+'</td>'+
+      '<td style="'+TD+';text-align:right;font-family:monospace">'+num(e.act)+'</td>'+
+      '<td style="'+TD+';text-align:right;font-family:monospace">'+num(e.yes)+'</td>'+
+      '<td style="'+TD+';text-align:right;font-family:monospace">'+num(e.hs)+'</td>'+
+      '<td style="'+TD+';text-align:right;font-family:monospace">'+num(e.cash)+'</td>'+
+      '<td style="'+TD+';text-align:right;font-family:monospace">'+num(e.btHeng)+'</td>'+
+      '<td style="'+TD+';text-align:right;font-family:monospace;font-weight:700">'+fmtN(alloc)+'</td>'+
+      '<td style="'+TD+';text-align:center;white-space:nowrap">'+(settled?'<span style="color:var(--green);font-weight:700">✓ 结清</span>':'<span style="color:var(--red);font-weight:700">欠 '+fmtN(bal)+'</span>')+'</td>'+
+    '</tr>';
+  }).join('');
+  var TH='padding:7px 8px;font-size:11px;border-bottom:2px solid var(--border2);white-space:nowrap;position:sticky;top:0;background:var(--surface2)';
+  var cols=[['日期','left'],['银行','left'],['账号','left'],['负责人','left'],['金额','right'],['ACT','right'],['YES','right'],['HS','right'],['CASH','right'],['BT HENG','right'],['已分配','right'],['状态/余额','center']];
+  var head='<tr>'+cols.map(function(c){return '<th style="'+TH+';text-align:'+c[1]+'">'+c[0]+'</th>';}).join('')+'</tr>';
+  var bt='border-top:2px solid var(--border2)';
+  var foot='<tr style="font-weight:800">'+
+    '<td colspan="4" style="padding:7px 8px;'+bt+';text-align:right">合计 '+rows.length+' 笔（'+nSettled+' 结清）</td>'+
+    '<td style="padding:7px 8px;'+bt+';text-align:right;font-family:monospace">'+fmtN(totAmt)+'</td>'+
+    '<td colspan="5" style="'+bt+'"></td>'+
+    '<td style="padding:7px 8px;'+bt+';text-align:right;font-family:monospace">'+fmtN(totAlloc)+'</td>'+
+    '<td style="padding:7px 8px;'+bt+';text-align:center">'+(Math.abs(totBal)<0.01?'<span style="color:var(--green)">✓ 全清</span>':'<span style="color:var(--red)">欠 '+fmtN(totBal)+'</span>')+'</td>'+
+  '</tr>';
+  wrap.innerHTML='<table id="ch-export-table" style="width:100%;border-collapse:collapse;color:var(--text)"><thead>'+head+'</thead><tbody>'+trs+'</tbody><tfoot>'+foot+'</tfoot></table>';
+}
+function _custHistFname(ext){ return '客户_'+String(_custHist.name||'').replace(/[\/\\:*?"<>|]/g,'-')+'.'+ext; }
+function _custHistExportExcel(){
+  if(typeof XLSX==='undefined'){ alert('XLSX 未加载'); return; }
+  var rows=_custHistCollect(_custHist.name,_custHist.from,_custHist.to);
+  if(!rows.length){ alert('无记录可导出'); return; }
+  var aoa=[['日期','银行','账号','负责人','金额','币种','ACT','YES','HS','CASH','BT HENG','已分配','余额','状态']];
+  rows.forEach(function(r){ var e=r.e, amt=_custHistAmt(e), alloc=(e.act||0)+(e.yes||0)+(e.hs||0)+(e.cash||0)+(e.btHeng||0), bal=_custEntryBalance(e);
+    aoa.push([r.chart.name,e.bank,e.account,e.owner||'',amt,_custHistCur(e),e.act||'',e.yes||'',e.hs||'',e.cash||'',e.btHeng||'',alloc,Math.abs(bal)<0.005?0:bal,_custEntrySettled(e)?'已结清':'未结清']); });
+  var wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(aoa),'History');
+  XLSX.writeFile(wb,_custHistFname('xlsx'));
+}
+function _custHistCaptureBg(){ try{ return getComputedStyle(document.querySelector('#modal-cust-hist .modal')).backgroundColor||'#13171c'; }catch(e){ return '#13171c'; } }
+function _custHistExportImage(){
+  var el=document.getElementById('ch-export-table'); if(!el){ alert('无表格可导出'); return; }
+  if(typeof html2canvas==='undefined'){ alert('图片库还在加载，请几秒后再试'); return; }
+  html2canvas(el,{backgroundColor:_custHistCaptureBg(),scale:2}).then(function(cv){
+    var a=document.createElement('a'); a.href=cv.toDataURL('image/png'); a.download=_custHistFname('png'); document.body.appendChild(a); a.click(); a.remove();
+  }).catch(function(e){ alert('导出图片失败：'+e); });
+}
+function _custHistExportPDF(){
+  var el=document.getElementById('ch-export-table'); if(!el){ alert('无表格可导出'); return; }
+  var JS=(window.jspdf&&window.jspdf.jsPDF)||window.jsPDF;
+  if(typeof html2canvas==='undefined'||!JS){ alert('PDF库还在加载，请几秒后再试'); return; }
+  html2canvas(el,{backgroundColor:_custHistCaptureBg(),scale:2}).then(function(cv){
+    var img=cv.toDataURL('image/png');
+    var pdf=new JS({orientation:'landscape',unit:'pt',format:'a4'});
+    var pw=pdf.internal.pageSize.getWidth()-40, ih=cv.height*(pw/cv.width);
+    pdf.setFontSize(13); pdf.text('客户交易历史 - '+_custHist.name, 20, 26);
+    pdf.addImage(img,'PNG',20,40,pw,ih);
+    pdf.save(_custHistFname('pdf'));
+  }).catch(function(e){ alert('导出PDF失败：'+e); });
 }
 
 // ======================================================
