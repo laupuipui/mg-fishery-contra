@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260702122842 -->
+<!-- MG Fishery Contra System v20260702124457 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260702122842';  /*BUILD*/
+window.__APP_VER__ = '20260702124457';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -5058,6 +5058,13 @@ function _cdChartAllocTotal(c){
 // Base DAY name — strip any trailing "(恢复)"/parenthetical suffix so all copies of the same
 // day (incl. restore duplicates with a different name) group together.
 function _cdBaseDay(name){ return String(name||'').replace(/\s*\([^)]*\)\s*$/,'').trim(); }
+// Normalised business-day key from a chart NAME ("d/m/yyyy" → "yyyy-mm-dd"), format-agnostic
+// (so "2/7/2026" and "02/07/2026" are the SAME day). '' if the name isn't a date. This is the
+// ground truth for "which day is this chart" — NEVER use c.date (rewritten to now on every save).
+function _cdNameDayKey(name){
+  var m=String(name||'').replace(/\s*\([^)]*\)\s*$/,'').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  return m ? (m[3]+'-'+('0'+m[2]).slice(-2)+'-'+('0'+m[1]).slice(-2)) : '';
+}
 // Customer identity within a day (name without the C/D tag + account + group).
 function _cdCustKey(e){ return String(e&&e.name||'').replace(/\s*\[C\/D[^\]]*\]/g,'').trim().toLowerCase()+'|'+(e&&e.account||'')+'|'+(e&&e.group||''); }
 // Customer + amount — a TRANSACTION identity. Two rows with this same key are the SAME deal
@@ -5126,18 +5133,21 @@ function _cdCarriedIntoTodaySet(){
   var set = {};
   function scan(list){ (list||[]).forEach(function(e){ if(e && e.cdSource){ if(e.cdSource.id) set['id:'+e.cdSource.id]=1; if(e.cdSource.sig) set['sig:'+e.cdSource.sig]=1; if(e.cdSource.srcKey) set['sk:'+e.cdSource.srcKey]=1; } }); }
   try { scan(entries); } catch(_){}
-  try { var ts=_todayDateStr(); _cdCanonicalCharts().forEach(function(c){ if(c && _cdBaseDay(c.name)===ts) scan(c.entries); }); } catch(_){}
+  try { var tk=_dayKey(); _cdCanonicalCharts().forEach(function(c){ if(c && _cdNameDayKey(c.name)===tk) scan(c.entries); }); } catch(_){}
   return set;
 }
 
-// The single immediately-preceding working day's chart (most recent canonical day before today).
+// The single immediately-preceding working day's chart = the chart with the HIGHEST business-day
+// (from its NAME) that is STRICTLY BEFORE today. Sorting by the parsed day — NOT c.date — is what
+// stops "a recently-edited old chart" (or today itself, via a leading-zero name mismatch) from
+// being mistaken for "yesterday" and carried down.
 function _cdPrevDayChart(){
-  var ts=_todayDateStr(), best=null, bestT=-1;
+  var tk=_dayKey(), best=null, bestK='';
   _cdCanonicalCharts().forEach(function(c){
     if(!c || !Array.isArray(c.entries)) return;
-    if(_cdBaseDay(c.name)===ts) return;                 // exclude today
-    var tm=c.date?new Date(c.date).getTime():0;
-    if(tm>bestT){ bestT=tm; best=c; }
+    var ck=_cdNameDayKey(c.name);
+    if(!ck || ck>=tk) return;                           // skip non-dated names, today, and future
+    if(ck>bestK){ bestK=ck; best=c; }
   });
   return best;
 }
@@ -5156,9 +5166,11 @@ function _cdBuildItems(filterChartId){
     var prev = _cdPrevDayChart();
     sourceCharts = prev ? [prev] : [];
   } else if(filterChartId === '__ALL__'){
-    sourceCharts = _cdCanonicalCharts().filter(function(c){ return c && Array.isArray(c.entries) && _cdBaseDay(c.name)!==todayStr; });
+    var _tk=_dayKey();
+    sourceCharts = _cdCanonicalCharts().filter(function(c){ return c && Array.isArray(c.entries) && _cdNameDayKey(c.name)!==_tk; });
   } else {
-    sourceCharts = _cdCanonicalCharts().filter(function(c){ return c && String(c.id)===String(filterChartId) && _cdBaseDay(c.name)!==todayStr; });
+    var _tk2=_dayKey();
+    sourceCharts = _cdCanonicalCharts().filter(function(c){ return c && String(c.id)===String(filterChartId) && _cdNameDayKey(c.name)!==_tk2; });
   }
   var items = [];
   sourceCharts.forEach(function(c){
@@ -5589,6 +5601,34 @@ function _cdRefixTodayV1(){
 // ── ONE-TIME CLEANUP — collapse duplicate / "(恢复)" charts into ONE chart per DAY. Uses the
 // SAME merge as cross-device sync (union entries by _id → NO row is ever dropped), so it's
 // data-safe. Backs up the full chart list first. Tidies history + speeds things up. ──
+// ── ONE-TIME cleanup — remove "self-carry" rows: carried-in rows tagged "[C/D fr <today>]"
+// (the prev-day-by-c.date bug carried today's own leftovers back into today). Only removes rows
+// whose source day == today; genuine "[C/D fr yesterday]" carries are kept. Backed up first. ──
+function _cdRemoveSelfCarryV1(){
+  try{
+    if(localStorage.getItem('mg_selfcarry_fix_v1')) return;
+    if(_dayKey() > '2026-07-20'){ localStorage.setItem('mg_selfcarry_fix_v1','expired'); return; }
+    if(!Array.isArray(entries)) return;   // entries not ready yet — try again next tick
+    var now=new Date(), td=now.getDate(), tm=now.getMonth()+1;
+    var wrong=entries.filter(function(e){
+      if(!e||!e.isCD||!e.name) return false;
+      var m=String(e.name).match(/\[C\/D fr\s*(\d{1,2})\/(\d{1,2})/);
+      return m && (+m[1]===td) && (+m[2]===tm);   // carried "from today" = self-carry
+    });
+    if(!wrong.length){ localStorage.setItem('mg_selfcarry_fix_v1','done'); return; }
+    try { var bk=JSON.parse(localStorage.getItem('mg_overwrite_backups')||'[]');
+      bk.unshift({ ts:Date.now(), replacedAt:new Date().toISOString(), reason:'selfcarry_fix_v1',
+        original:{ id:'sc_'+Date.now(), name:'自带自己清理前备份', date:new Date().toISOString(), entries:entries.slice() } });
+      localStorage.setItem('mg_overwrite_backups', JSON.stringify(bk.slice(0,14))); } catch(e){}
+    var wid={}; wrong.forEach(function(e){ if(e._id) wid[e._id]=1; });
+    entries=entries.filter(function(e){ return !(e&&e._id&&wid[e._id]); });
+    localStorage.setItem('mg_selfcarry_fix_v1','done');
+    if(typeof saveEntries==='function') saveEntries();
+    if(typeof renderAll==='function') renderAll();
+    if(typeof _showSuccessToast==='function') _showSuccessToast('已清掉 '+wrong.length+' 条「今天自己带自己」的错误记录');
+  }catch(e){ console.warn('_cdRemoveSelfCarryV1 failed:', e); }
+}
+
 // ── ONE-TIME (2026-06-28 only) — today was reconciled BY HAND on all devices after the
 // junk-chart mis-carry. Block ALL auto/forced carry-in for today so nothing pollutes the
 // manual fix, and make sure CD starts no later than today so TOMORROW carries today's real
@@ -6981,7 +7021,7 @@ function exportPDF(printMode){
   const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260702122842 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260702124457 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
@@ -10225,6 +10265,7 @@ function init(){
     if(typeof _cdFixV1 === 'function') _cdFixV1();   // one-time cleanup of today's wrongly-carried C/D
     if(typeof _freshStartV1 === 'function') _freshStartV1();   // one-time clean slate for today (post-corruption)
     if(typeof _cdRefixTodayV1 === 'function') _cdRefixTodayV1();   // one-time fix for today's wrong auto-carries
+    if(typeof _cdRemoveSelfCarryV1 === 'function') _cdRemoveSelfCarryV1();   // one-time: remove "self-carry" rows (fr today)
     _mgRotationDone = true;                          // today's chart is ready
     if(typeof _maybeAutoCarry === 'function'){
       _maybeAutoCarry();                             // if the first pull already landed, carry now
