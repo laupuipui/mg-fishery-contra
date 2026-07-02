@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260702124457 -->
+<!-- MG Fishery Contra System v20260702125239 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260702124457';  /*BUILD*/
+window.__APP_VER__ = '20260702125239';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -1718,6 +1718,8 @@ function applySnapshot(data, applyEntries) {
   }
   // Monitor gets the LAST word after every sync — strips any resurrected/deleted rows etc.
   if(typeof _monitorScan === 'function'){ setTimeout(function(){ _monitorScan('sync'); }, 150); }
+  // A sync can union-merge self-carry rows back in — re-strip (+tombstone) them so they stick gone.
+  if(typeof _cdRemoveSelfCarryV1 === 'function'){ setTimeout(_cdRemoveSelfCarryV1, 200); }
   // First successful pull merged in other devices' work → safe to auto-carry now (no dup carries).
   _mgFirstPullDone = true;
   if(typeof _maybeAutoCarry === 'function'){ setTimeout(_maybeAutoCarry, 250); }
@@ -5604,28 +5606,34 @@ function _cdRefixTodayV1(){
 // ── ONE-TIME cleanup — remove "self-carry" rows: carried-in rows tagged "[C/D fr <today>]"
 // (the prev-day-by-c.date bug carried today's own leftovers back into today). Only removes rows
 // whose source day == today; genuine "[C/D fr yesterday]" carries are kept. Backed up first. ──
+// RECURRING (not one-time) — self-carry rows keep bouncing back via sync (union-merge from Drive /
+// another device that still has them), so this runs on open AND after every sync. Crucially it
+// TOMBSTONES the removed ids (like a manual delete) so the deletion propagates and STICKS; once
+// tombstoned, the chart-merge strips them before they reach the live set. No-op when none exist.
 function _cdRemoveSelfCarryV1(){
   try{
-    if(localStorage.getItem('mg_selfcarry_fix_v1')) return;
-    if(_dayKey() > '2026-07-20'){ localStorage.setItem('mg_selfcarry_fix_v1','expired'); return; }
-    if(!Array.isArray(entries)) return;   // entries not ready yet — try again next tick
+    if(_dayKey() > '2026-07-25') return;   // transition-period cleanup only (root cause already fixed)
+    if(!Array.isArray(entries)) return;
+    if(currentChartName && currentChartName.trim() !== _todayDateStr()) return;   // only while on today
     var now=new Date(), td=now.getDate(), tm=now.getMonth()+1;
     var wrong=entries.filter(function(e){
       if(!e||!e.isCD||!e.name) return false;
       var m=String(e.name).match(/\[C\/D fr\s*(\d{1,2})\/(\d{1,2})/);
-      return m && (+m[1]===td) && (+m[2]===tm);   // carried "from today" = self-carry
+      return m && (+m[1]===td) && (+m[2]===tm);   // carried "from today" = self-carry (invalid)
     });
-    if(!wrong.length){ localStorage.setItem('mg_selfcarry_fix_v1','done'); return; }
-    try { var bk=JSON.parse(localStorage.getItem('mg_overwrite_backups')||'[]');
-      bk.unshift({ ts:Date.now(), replacedAt:new Date().toISOString(), reason:'selfcarry_fix_v1',
+    if(!wrong.length) return;
+    var firstTime = !localStorage.getItem('mg_selfcarry_backed');
+    if(firstTime){ try { var bk=JSON.parse(localStorage.getItem('mg_overwrite_backups')||'[]');
+      bk.unshift({ ts:Date.now(), replacedAt:new Date().toISOString(), reason:'selfcarry_strip',
         original:{ id:'sc_'+Date.now(), name:'自带自己清理前备份', date:new Date().toISOString(), entries:entries.slice() } });
-      localStorage.setItem('mg_overwrite_backups', JSON.stringify(bk.slice(0,14))); } catch(e){}
-    var wid={}; wrong.forEach(function(e){ if(e._id) wid[e._id]=1; });
+      localStorage.setItem('mg_overwrite_backups', JSON.stringify(bk.slice(0,14))); localStorage.setItem('mg_selfcarry_backed','1'); } catch(e){} }
+    var ids=wrong.map(function(e){return e._id;}).filter(Boolean);
+    if(typeof _addTombstones==='function') _addTombstones(ids);   // make the removal stick across sync
+    var wid={}; ids.forEach(function(i){ wid[i]=1; });
     entries=entries.filter(function(e){ return !(e&&e._id&&wid[e._id]); });
-    localStorage.setItem('mg_selfcarry_fix_v1','done');
     if(typeof saveEntries==='function') saveEntries();
     if(typeof renderAll==='function') renderAll();
-    if(typeof _showSuccessToast==='function') _showSuccessToast('已清掉 '+wrong.length+' 条「今天自己带自己」的错误记录');
+    if(firstTime && typeof _showSuccessToast==='function') _showSuccessToast('已清掉 '+wrong.length+' 条「今天自己带自己」的错误记录（并阻止它们同步回来）');
   }catch(e){ console.warn('_cdRemoveSelfCarryV1 failed:', e); }
 }
 
@@ -7021,7 +7029,7 @@ function exportPDF(printMode){
   const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260702124457 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260702125239 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
