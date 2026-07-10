@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260710114006 -->
+<!-- MG Fishery Contra System v20260710225619 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260710114006';  /*BUILD*/
+window.__APP_VER__ = '20260710225619';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -1393,13 +1393,16 @@ function safeSetItem(key, value){
         console.log('localStorage cleanup succeeded, retry OK');
         return true;
       } catch(e2){
-        // Still failing — try harder
+        // Still failing — drop op-log snapshots (keep the text log), NEVER touch mg_charts:
+        // silently truncating the business history to free space is unacceptable data loss.
         try {
-          var charts = JSON.parse(localStorage.getItem('mg_charts')||'[]');
-          if(charts.length > 30){
-            localStorage.setItem('mg_charts', JSON.stringify(charts.slice(0,30)));
+          var lg2 = JSON.parse(localStorage.getItem('mg_oplog')||'[]');
+          var stripped=false;
+          lg2.forEach(function(o){ if(o && o.snap){ delete o.snap; stripped=true; } });
+          if(stripped){
+            localStorage.setItem('mg_oplog', JSON.stringify(lg2));
             localStorage.setItem(key, value);
-            console.log('Reduced charts to 30, retry OK');
+            console.log('Stripped oplog snapshots, retry OK');
             return true;
           }
         } catch(e3){}
@@ -1428,16 +1431,27 @@ function debounce(fn, ms) {
 // anywhere (live entries or charts). This is the ground truth the monitor enforces.
 // ======================================================
 var TOMBSTONE_KEY = 'mg_tombstones';
+// Tombstone record: { t: deletedAt, c?: clearedAt }. A tombstone is ACTIVE only while t > (c||0).
+// The clearedAt timestamp is what lets an "undo delete" WIN across devices: the sync merge keeps
+// the max of each side's t and c, so a newer clear beats an older delete (and a newer re-delete
+// beats an older clear). The old format (plain number) is normalized on read.
+function _tombNorm(v){ return (v && typeof v === 'object') ? v : (typeof v === 'number' ? {t:v} : null); }
+function _tombActive(v){ var r=_tombNorm(v); return !!(r && r.t && r.t > (r.c||0)); }
+function _tombTime(v){ var r=_tombNorm(v); return r ? (r.t||0) : 0; }
 function _getTombstones(){
-  try { return JSON.parse(localStorage.getItem(TOMBSTONE_KEY)||'{}') || {}; }
-  catch(e){ return {}; }
+  try {
+    var raw = JSON.parse(localStorage.getItem(TOMBSTONE_KEY)||'{}') || {};
+    var out = {};
+    Object.keys(raw).forEach(function(id){ var r=_tombNorm(raw[id]); if(r) out[id]=r; });
+    return out;
+  } catch(e){ return {}; }
 }
 function _saveTombstones(tomb){
   try {
-    // prune: keep most-recent 5000
+    // prune: keep most-recent 5000 (by latest event time)
     var ids = Object.keys(tomb);
     if(ids.length > 5000){
-      ids.sort(function(a,b){ return tomb[a]-tomb[b]; });  // oldest first
+      ids.sort(function(a,b){ return Math.max(_tombTime(tomb[a]),(tomb[a].c||0)) - Math.max(_tombTime(tomb[b]),(tomb[b].c||0)); });
       ids.slice(0, ids.length-5000).forEach(function(id){ delete tomb[id]; });
     }
     safeSetItem(TOMBSTONE_KEY, JSON.stringify(tomb));
@@ -1448,21 +1462,21 @@ function _addTombstones(ids){
   if(!ids || !ids.length) return;
   var tomb = _getTombstones();
   var now = Date.now();
-  ids.forEach(function(id){ if(id) tomb[id] = now; });
+  ids.forEach(function(id){ if(id){ var r=tomb[id]||{}; r.t=now; tomb[id]=r; } });
   _saveTombstones(tomb);
 }
 function _isTombstoned(id){
   if(!id) return false;
   var tomb = _getTombstones();
-  return Object.prototype.hasOwnProperty.call(tomb, id);
+  return _tombActive(tomb[id]);
 }
-// If the user genuinely re-loads/restores a state that should contain a tombstoned id,
-// clear that tombstone (e.g. op-log restore). Used to avoid the monitor fighting a restore.
+// The user genuinely restored/re-added a tombstoned id → record a CLEAR (timestamped, so it
+// propagates via sync and beats the older delete on every device).
 function _clearTombstones(ids){
   if(!ids || !ids.length) return;
   var tomb = _getTombstones();
-  var changed = false;
-  ids.forEach(function(id){ if(id && tomb[id]!==undefined){ delete tomb[id]; changed=true; } });
+  var changed = false, now = Date.now();
+  ids.forEach(function(id){ if(id && tomb[id] && _tombActive(tomb[id])){ tomb[id].c = now; changed=true; } });
   if(changed) _saveTombstones(tomb);
 }
 
@@ -1508,19 +1522,16 @@ function _mergeChartPair(a, b){
   // Tombstones express "deleted from TODAY's working set" — apply them ONLY to the
   // chart named for today. Historical charts are immutable records (and CD sources);
   // a deletion today must never strip a same-_id row out of yesterday's chart.
-  // Compare by PARSED day (yyyy-mm-dd), not the locale-formatted name — otherwise a device whose
-  // date renders "2/7/2026" wouldn't recognise a chart named "02/07/2026" as today, and would
-  // silently skip the tombstones → a row deleted on another device resurrects via this union.
-  var _isTodayChart = (function(){ try {
-    if(typeof _cdNameDayKey==='function' && typeof _dayKey==='function'){ var k=_cdNameDayKey(primary.name); if(k) return k===_dayKey(); }
-    return (typeof _cdBaseDay==='function'?_cdBaseDay(primary.name):(primary.name||'').trim()) === _todayDateStr();
-  } catch(_){ return false; } })();
+  // Compare by BUSINESS DAY — never by the (locale-sensitive) name string, otherwise a device
+  // rendering "2/7/2026" wouldn't recognise "02/07/2026" as today and would skip the tombstones
+  // → a row deleted on another device resurrects via this union.
+  var _isTodayChart = (function(){ try { return _chartDay(primary) === _dayKey(); } catch(_){ return false; } })();
   var byKey = {}, order = [];
   function add(list, isPrimary){
     (list||[]).forEach(function(e){
       if(!e) return;
-      // Tombstoned → drop (today only), UNLESS edited after the deletion (edit wins).
-      if(_isTodayChart && e._id && tomb[e._id] && !(e.updatedAt && e.updatedAt > tomb[e._id])) return;
+      // ACTIVE tombstone → drop (today only), UNLESS edited after the deletion (edit wins).
+      if(_isTodayChart && e._id && _tombActive(tomb[e._id]) && !(e.updatedAt && e.updatedAt > _tombTime(tomb[e._id]))) return;
       var k=_entryKey(e);
       if(!(k in byKey)){ byKey[k]=e; order.push(k); }
       else if(isPrimary){ byKey[k]=e; }
@@ -1539,27 +1550,30 @@ function _mergeChartPair(a, b){
 function _reconcileLiveToTodayChart(charts){
   try {
     if(typeof _historyView !== 'undefined' && _historyView) return;     // viewing history → don't touch live
-    var tName = _todayDateStr();
-    if(currentChartName && currentChartName.trim() !== tName) return;    // editing a past day → don't touch
+    var tk = _dayKey();
+    // Editing a past day → don't touch (compare by parsed day, not name string).
+    if(currentChartName && (_cdNameDayKey(currentChartName)||tk) !== tk) return;
     if(!Array.isArray(charts)){ try{ charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]'); }catch(e){ return; } }
-    var tc = charts.find(function(c){ return c && c.name && c.name.trim()===tName; });
-    if(!tc || !Array.isArray(tc.entries)) return;
+    var tc = charts.find(function(c){ return c && _chartDay(c)===tk && Array.isArray(c.entries); });
+    if(!tc) return;
     if(JSON.stringify(tc.entries) === JSON.stringify(entries)) return;   // already in sync
     entries = JSON.parse(JSON.stringify(tc.entries));
     safeSetItem(ENTRIES_KEY, JSON.stringify(entries));
-    if(typeof _setCurrentChart === 'function') _setCurrentChart(tc.id, tName);
+    if(typeof _setCurrentChart === 'function') _setCurrentChart(tc.id, tc.name || _dayToName(tk));
     localStorage.setItem('mg_last_active_chart_date', _dayKey());
     if(typeof _bumpAction === 'function') _bumpAction();   // legitimate change (for the watchdog)
     if(typeof renderAll === 'function') renderAll();
   } catch(e){ console.warn('_reconcileLiveToTodayChart failed:', e); }
 }
 
-// Merge two chart LISTS by DAY (union entries per day; "(恢复)"/suffix copies collapse into the
-// real day). No row ever lost. Merged charts are renamed to the clean base-day.
+// Merge two chart LISTS by BUSINESS DAY (union entries per day). The day comes from _chartDay
+// (c.day / parsed name / date fallback) — NOT the raw name string, so "2/7/2026" (one locale) and
+// "02/07/2026" (another) collapse into ONE chart. Output is normalized: every chart stamped with
+// its immutable c.day and the canonical fixed-format name. Sorting & the 365-cap use the DAY
+// (oldest business days pruned), never c.date (which is just "last edited" and gets rewritten).
 function _mergeChartLists(localList, driveList){
   var map = {}, order = [];
-  function bday(c){ return (typeof _cdBaseDay==='function') ? _cdBaseDay(c.name) : String((c.name||'')).trim(); }
-  function key(c){ return 'day:'+bday(c); }
+  function key(c){ return 'day:' + _chartDay(c); }
   function take(list){
     (list||[]).forEach(function(c){
       if(!c) return;
@@ -1569,26 +1583,100 @@ function _mergeChartLists(localList, driveList){
     });
   }
   take(localList); take(driveList);
-  var merged = order.map(function(k){ var c=map[k]; var bd=bday(c); if(c && c.name && c.name.trim()!==bd) c=Object.assign({},c,{name:bd}); return c; });
-  merged.sort(function(a,b){ return (b.date?new Date(b.date).getTime():0) - (a.date?new Date(a.date).getTime():0); });
+  var merged = order.map(function(k){
+    var c = map[k], d = _chartDay(c);
+    if(!c.day || c.day !== d || c.name !== _dayToName(d)) c = Object.assign({}, c, { day: d, name: _dayToName(d) });
+    return c;
+  });
+  merged.sort(function(a,b){ return _chartDay(b) < _chartDay(a) ? -1 : _chartDay(b) > _chartDay(a) ? 1 : 0; });
   if(merged.length > 365) merged = merged.slice(0,365);
   return merged;
+}
+
+// One-time shrink of EXISTING storage bloat (old caps left snapshots/backups/oplog huge, which
+// exhausted the quota and broke saving). Runs before the day-key migration so it has room.
+function _storageDietV1(){
+  try {
+    if(localStorage.getItem('mg_storage_diet_v1')) return;
+    try { var sn=JSON.parse(localStorage.getItem('mg_snapshots')||'[]'); if(sn.length>5) localStorage.setItem('mg_snapshots', JSON.stringify(sn.slice(0,5))); } catch(e){}
+    try {
+      var ob=JSON.parse(localStorage.getItem('mg_overwrite_backups')||'[]');
+      ob = ob.slice(0,5).map(function(b){
+        if(b && b.original && Array.isArray(b.original.charts) && b.original.charts.length>3){
+          b = JSON.parse(JSON.stringify(b));
+          b.original.charts = b.original.charts.slice(0,3);   // keep a taste, drop the year-blob
+        }
+        return b;
+      });
+      localStorage.setItem('mg_overwrite_backups', JSON.stringify(ob));
+    } catch(e){}
+    try {
+      var lg=JSON.parse(localStorage.getItem('mg_oplog')||'[]');
+      if(lg.length>150) lg=lg.slice(0,150);
+      for(var i=60;i<lg.length;i++){ if(lg[i]&&lg[i].snap) delete lg[i].snap; }
+      localStorage.setItem('mg_oplog', JSON.stringify(lg));
+    } catch(e){}
+    localStorage.setItem('mg_storage_diet_v1', new Date().toISOString());
+  } catch(e){ console.warn('_storageDietV1 failed:', e); }
+}
+
+// Idempotent normalization: stamp c.day, collapse same-day duplicates, canonical names. Cheap
+// no-op when already clean. Run at init (migrates old data once) — sync merges normalize too.
+function _normalizeChartsV1(){
+  try {
+    var raw = localStorage.getItem(CHARTS_KEY)||'[]';
+    var charts; try{ charts = JSON.parse(raw); }catch(e){ return false; }
+    if(!Array.isArray(charts) || !charts.length) return false;
+    var seen = {}, dirty = false;
+    for(var i=0;i<charts.length;i++){
+      var c = charts[i]; if(!c) { dirty = true; break; }
+      var d = _chartDay(c);
+      if(!c.day || c.day !== d || c.name !== _dayToName(d) || seen[d]){ dirty = true; break; }
+      seen[d] = 1;
+    }
+    if(!dirty) return false;
+    // First-ever normalization: keep a lean safety copy (entry rows only, not the whole blob).
+    if(!localStorage.getItem('mg_daykey_mig_v1')){
+      try { var bk=JSON.parse(localStorage.getItem('mg_overwrite_backups')||'[]');
+        bk.unshift({ ts:Date.now(), replacedAt:new Date().toISOString(), reason:'daykey_migration',
+          original:{ id:'mig_'+Date.now(), name:'day-key迁移前备份', date:new Date().toISOString(),
+                     entries:(JSON.parse(localStorage.getItem(ENTRIES_KEY)||'[]')||[]) } });
+        localStorage.setItem('mg_overwrite_backups', JSON.stringify(bk.slice(0,5)));
+      } catch(e){}
+      localStorage.setItem('mg_daykey_mig_v1', new Date().toISOString());
+    }
+    var merged = _mergeChartLists(charts, []);
+    safeSetItem(CHARTS_KEY, JSON.stringify(merged));
+    // Re-bind the current chart by DAY (its id/name may have changed in the collapse).
+    try {
+      var curDay = null;
+      if(currentChartName) curDay = _cdNameDayKey(currentChartName) || null;
+      if(!curDay) curDay = _dayKey();
+      var cur = merged.find(function(c){ return _chartDay(c)===curDay; });
+      if(cur && typeof _setCurrentChart==='function') _setCurrentChart(cur.id, cur.name);
+    } catch(e){}
+    if(typeof _bumpAction==='function') _bumpAction();
+    return true;
+  } catch(e){ console.warn('_normalizeChartsV1 failed:', e); return false; }
 }
 
 // If a merge would shrink any same-name chart's entry count, back up the local list first.
 function _backupBeforeChartMerge(localList, mergedList){
   try {
-    var mByName = {}; mergedList.forEach(function(c){ mByName[(c.name||'').trim()] = (c.entries||[]).length; });
-    var shrink = (localList||[]).some(function(c){
-      var after = mByName[(c.name||'').trim()];
+    var mByDay = {}; mergedList.forEach(function(c){ mByDay[_chartDay(c)] = (c.entries||[]).length; });
+    // Back up ONLY the charts that would shrink — storing the whole chart list here was the
+    // single biggest storage hog (multiple full copies of a year of data → quota exhaustion →
+    // the permanent "未保存" symptom). Lean pool, cap 3.
+    var shrinking = (localList||[]).filter(function(c){
+      var after = mByDay[_chartDay(c)];
       return typeof after === 'number' && after < (c.entries||[]).length;
     });
-    if(!shrink) return;
+    if(!shrinking.length) return;
     var pool = JSON.parse(localStorage.getItem('mg_overwrite_backups')||'[]');
     pool.unshift({ ts: Date.now(), replacedAt: new Date().toISOString(),
-      original: { id:'chartmerge_'+Date.now(), name:'合并前自动备份(全部图表)', date:new Date().toISOString(),
-                  entries: [], charts: JSON.parse(JSON.stringify(localList||[])) } });
-    if(pool.length > 12) pool = pool.slice(0,12);
+      original: { id:'chartmerge_'+Date.now(), name:'合并前自动备份(将收缩的表)', date:new Date().toISOString(),
+                  entries: [], charts: JSON.parse(JSON.stringify(shrinking)) } });
+    if(pool.length > 3) pool = pool.slice(0,3);
     localStorage.setItem('mg_overwrite_backups', JSON.stringify(pool));
   } catch(e){ console.warn('_backupBeforeChartMerge failed:', e); }
 }
@@ -1643,8 +1731,14 @@ function applySnapshot(data, applyEntries) {
     try {
       var localTomb = _getTombstones();
       Object.keys(data.tombstones).forEach(function(id){
-        var ts = data.tombstones[id];
-        if(typeof ts === 'number' && (!localTomb[id] || ts > localTomb[id])) localTomb[id] = ts;
+        var inc = _tombNorm(data.tombstones[id]);
+        if(!inc) return;
+        var cur = localTomb[id] || {t:0};
+        // Field-wise max: the NEWEST delete and the NEWEST clear both survive the merge, so
+        // whichever action happened last (delete vs undo-delete) wins on every device.
+        localTomb[id] = { t: Math.max(cur.t||0, inc.t||0) };
+        var mc = Math.max(cur.c||0, inc.c||0);
+        if(mc) localTomb[id].c = mc;
       });
       _saveTombstones(localTomb);
     } catch(e){}
@@ -1716,7 +1810,12 @@ function applySnapshot(data, applyEntries) {
     localStorage.setItem('mg_banks', JSON.stringify(ALL_BANKS_OPTS));
   }
 
-  if (changed) renderAll();
+  if (changed){
+    renderAll();
+    // Record the sync as an EXPLAINED mutation (no snapshot payload — keep the op-log lean).
+    // The watchdog's ghost/rate rules check for a recent 'sync_apply' before reverting.
+    if(typeof _logOp==='function') try{ _logOp('sync_apply','云端同步已应用'); }catch(e){}
+  }
   // After applying Drive data, re-check rotation in case Drive overwrote entries with old data
   // (rotation is idempotent — it will no-op if same day already handled)
   if(typeof _checkDailyChartRotation === 'function'){
@@ -2083,7 +2182,7 @@ function _monitorScan(reason){
   // Tombstone removal applies only while working on TODAY. When reviewing a historical
   // chart, don't delete its rows out from under the user (and loadChart already cleared
   // their tombstones — this is a double safeguard).
-  var _monOnToday = (function(){ try { return !currentChartName || (currentChartName||'').trim()===_todayDateStr(); } catch(_){ return true; } })();
+  var _monOnToday = (function(){ try { return !currentChartName || (_cdNameDayKey(currentChartName)||_dayKey())===_dayKey(); } catch(_){ return true; } })();
   var before = null;            // lazy: only snapshot if we actually change something
   var fixed = [];               // human descriptions
   var flags = [];               // {key,msg} needing user decision
@@ -2095,17 +2194,9 @@ function _monitorScan(reason){
   for(var i=0;i<entries.length;i++){
     var e = entries[i];
     if(!e) { ensureSnap(); continue; }   // drop null holes
-    // (1) tombstone enforcement — a deleted id reappeared (sync resurrection)
-    if(_monOnToday && e._id && tomb[e._id]){
-      // If this copy was edited AFTER the deletion, the edit wins: keep it, clear the tombstone.
-      if(e.updatedAt && e.updatedAt > tomb[e._id]){
-        if(typeof _clearTombstones==='function') _clearTombstones([e._id]);
-        next.push(e); continue;
-      }
-      var bkey='tomb:'+e._id;
-      if(_monitorBreaker(bkey)){ flags.push({key:bkey,msg:'记录「'+(e.name||e._id)+'」反复被带回 — 已暂停自动删除,请你确认是删还是留'}); next.push(e); continue; }
-      ensureSnap(); fixed.push('剔除已删除却又出现的记录：'+(e.name||e._id)); continue;
-    }
+    // (1) tombstone enforcement REMOVED from this monitor — MGAudit's resurrect rule is now the
+    // single owner (one enforcement point, one criteria set; two monitors deleting rows on
+    // different rules was itself a source of "records vanish randomly"). Structural repairs only.
     // (2) missing / duplicate _id
     if(!e._id){ ensureSnap(); e._id=_genId(); fixed.push('补全缺失ID：'+(e.name||'')); }
     if(seen[e._id]){ ensureSnap(); e._id=_genId(); fixed.push('修复重复ID：'+(e.name||'')); }
@@ -2854,22 +2945,26 @@ function updateUndoBtns(){
 function _persistCurrentChart(){
   try {
     var name = currentChartName || _todayDateStr();
+    // The chart's BUSINESS DAY: from the bound name, else today. Immutable once set.
+    var day = _cdNameDayKey(name) || _dayKey();
     var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
     var idx = -1;
     if(currentChartId!=null) idx = charts.findIndex(function(c){ return c && String(c.id)===String(currentChartId); });
-    if(idx < 0) idx = charts.findIndex(function(c){ return c && c.name && c.name.trim()===name; });
+    if(idx < 0) idx = charts.findIndex(function(c){ return c && _chartDay(c)===day; });
     var rsnap = {sgd:rates.sgd, thb:rates.thb, idr:rates.idr, sgdThb:rates.sgdThb, sgdIdr:rates.sgdIdr};
     if(idx >= 0){
       charts[idx].entries = JSON.parse(JSON.stringify(entries));
-      charts[idx].date = new Date().toISOString();
+      charts[idx].date = new Date().toISOString();   // editedAt ONLY — day logic must use c.day
+      if(!charts[idx].day) charts[idx].day = _chartDay(charts[idx]);   // stamp legacy charts
       // Only update rates when we actually have some (never wipe good rates with empty).
       if(rsnap.sgd||rsnap.thb||rsnap.idr||rsnap.sgdThb||rsnap.sgdIdr) charts[idx].rates = rsnap;
       if(currentChartId==null) _setCurrentChart(charts[idx].id, charts[idx].name);
     } else {
-      var nc = { id:(currentChartId!=null?currentChartId:Date.now()), name:name, date:new Date().toISOString(),
+      var nc = { id:(currentChartId!=null?currentChartId:Date.now()), day:day, name:_dayToName(day), date:new Date().toISOString(),
                  entries:JSON.parse(JSON.stringify(entries)), rates:rsnap };
       charts.unshift(nc);
-      if(charts.length>365) charts.pop();
+      // Cap: drop the OLDEST business day, not the last array slot (array order isn't guaranteed).
+      if(charts.length>365){ var oi=0, ok='9999'; charts.forEach(function(c,i){ var d=_chartDay(c); if(d<ok){ok=d;oi=i;} }); charts.splice(oi,1); }
       _setCurrentChart(nc.id, nc.name);
     }
     safeSetItem(CHARTS_KEY, JSON.stringify(charts));
@@ -2959,7 +3054,9 @@ function _logOp(type, msg, opts){
       rec.count = opts.snap.length;
     }
     log.unshift(rec);
-    if(log.length > 300) log = log.slice(0,300);
+    if(log.length > 150) log = log.slice(0,150);
+    // Only the newest 60 ops keep their restore snapshots — older ones keep the text record only.
+    for(var _oi=60; _oi<log.length; _oi++){ if(log[_oi] && log[_oi].snap) delete log[_oi].snap; }
     var str = JSON.stringify(log);
     // Size guard ~2MB: drop oldest snapshots first, then oldest records.
     if(str.length > 2000000){
@@ -2980,7 +3077,7 @@ function saveLocalSnapshot(){
       entries: JSON.parse(JSON.stringify(entries)),
       rates: {sgd:rates.sgd, thb:rates.thb, idr:rates.idr, sgdThb:rates.sgdThb, sgdIdr:rates.sgdIdr}
     });
-    if(snaps.length > 20) snaps = snaps.slice(0, 20);
+    if(snaps.length > 5) snaps = snaps.slice(0, 5);   // lean: 5 recovery points is plenty; 20 was a quota hog
     var snapStr = JSON.stringify(snaps);
     // Only save if under 3MB to avoid quota errors
     if(snapStr.length < 3000000){
@@ -3043,7 +3140,7 @@ function _saveRatesToTodayChart(){
     // history, would write yesterday's rows into a today-named chart → today gets
     // overwritten by yesterday). If today's chart doesn't exist yet, do nothing —
     // the rate stays in global mg_rates and is captured at the next real save/rotation.
-    var idx = charts.findIndex(function(c){ return c.name && c.name.trim()===todayName; });
+    var idx = charts.findIndex(function(c){ return c && _chartDay(c)===_dayKey(); });
     if(idx < 0) return;
     var rsnap = {sgd:rates.sgd, thb:rates.thb, idr:rates.idr, sgdThb:rates.sgdThb, sgdIdr:rates.sgdIdr};
     var allEmpty = !(rsnap.sgd||rsnap.thb||rsnap.idr||rsnap.sgdThb||rsnap.sgdIdr);
@@ -4043,8 +4140,15 @@ function openEditModal(id){
       </div>
     </div>
     <label>${t('modal_amt_lbl')}</label>
+    ${(e.isCD && e.cdSource) ? `
+    <input type="text" id="edit-amt" value="${e.amount||e.rmAmount||0}" readonly
+      style="background:var(--surface);color:var(--text3);cursor:not-allowed">
+    <div style="font-size:11px;color:var(--yellow);margin-top:4px;line-height:1.5">
+      🔒 带入金额来自 ${e.cdSource.srcDay ? _dayToName(e.cdSource.srcDay) : '来源日'} 的未结清余额，不能在今天直接改。<br>
+      要修正请到「📁 历史」打开那一天修改来源记录，这里会自动跟着更新。
+    </div>` : `
     <input type="text" inputmode="decimal" id="edit-amt" value="${e.amount||e.rmAmount||0}" placeholder="0.00 或 100+200*3" oninput="_updateEditAmtCalc()">
-    <div id="edit-amt-calc-preview" style="font-size:11px;color:var(--text3);margin-top:4px;font-family:'IBM Plex Mono',monospace;min-height:14px"></div>
+    <div id="edit-amt-calc-preview" style="font-size:11px;color:var(--text3);margin-top:4px;font-family:'IBM Plex Mono',monospace;min-height:14px"></div>`}
     <label>${t('modal_cur_lbl')}</label>
     <div class="currency-chips">
       ${['RM','SGD','IDR','THB'].map(c=>`<div class="chip ${e.currency===c?'selected':''}" onclick="editSelectCur('${c}',this)">${c}</div>`).join('')}
@@ -4073,7 +4177,10 @@ function editSelectCur(c,el){
   el.classList.add('selected'); modalState.editCur=c;
 }
 function confirmEdit(idx){
-  const amt=(_parseAmtExpr(document.getElementById('edit-amt').value)||0);
+  var _ee = entries[idx];
+  // Carried-in rows: amount is DERIVED from the source day's balance — hard-block any change
+  // (belt & braces on top of the readonly input; fix the source day instead).
+  const amt=(_ee && _ee.isCD && _ee.cdSource) ? (_ee.amount||0) : (_parseAmtExpr(document.getElementById('edit-amt').value)||0);
   const owner=document.getElementById('edit-owner').value.trim();
   const cur=modalState.editCur||entries[idx].currency;
   if(typeof _logOp==='function') _logOp('edit', '编辑客户：'+(entries[idx]?entries[idx].name:''), {snap: entries});
@@ -5121,7 +5228,7 @@ function _cdCanonicalCharts(){
   if(_cdCanonCache.raw === raw && _cdCanonCache.val) return _cdCanonCache.val;
   var charts; try{ charts = JSON.parse(raw); }catch(e){ charts = []; }
   var byDay = {};
-  charts.forEach(function(c){ if(!c || !c.name || !Array.isArray(c.entries)) return; var d=_cdBaseDay(c.name); (byDay[d]=byDay[d]||[]).push(c); });
+  charts.forEach(function(c){ if(!c || !Array.isArray(c.entries)) return; var d=_chartDay(c); if(!d) return; (byDay[d]=byDay[d]||[]).push(c); });
   var out = [];
   Object.keys(byDay).forEach(function(day){
     var copies = byDay[day];
@@ -5170,7 +5277,7 @@ function _cdCarriedIntoTodaySet(){
   var set = {};
   function scan(list){ (list||[]).forEach(function(e){ if(e && e.cdSource){ if(e.cdSource.id) set['id:'+e.cdSource.id]=1; if(e.cdSource.sig) set['sig:'+e.cdSource.sig]=1; if(e.cdSource.srcKey) set['sk:'+e.cdSource.srcKey]=1; } }); }
   try { scan(entries); } catch(_){}
-  try { var tk=_dayKey(); _cdCanonicalCharts().forEach(function(c){ if(c && _cdNameDayKey(c.name)===tk) scan(c.entries); }); } catch(_){}
+  try { var tk=_dayKey(); _cdCanonicalCharts().forEach(function(c){ if(c && _chartDay(c)===tk) scan(c.entries); }); } catch(_){}
   return set;
 }
 
@@ -5182,8 +5289,8 @@ function _cdPrevDayChart(){
   var tk=_dayKey(), best=null, bestK='';
   _cdCanonicalCharts().forEach(function(c){
     if(!c || !Array.isArray(c.entries)) return;
-    var ck=_cdNameDayKey(c.name);
-    if(!ck || ck>=tk) return;                           // skip non-dated names, today, and future
+    var ck=_chartDay(c);
+    if(!ck || ck>=tk) return;                           // skip today and future — strictly a past day
     if(ck>bestK){ bestK=ck; best=c; }
   });
   return best;
@@ -5204,10 +5311,10 @@ function _cdBuildItems(filterChartId){
     sourceCharts = prev ? [prev] : [];
   } else if(filterChartId === '__ALL__'){
     var _tk=_dayKey();
-    sourceCharts = _cdCanonicalCharts().filter(function(c){ return c && Array.isArray(c.entries) && _cdNameDayKey(c.name)!==_tk; });
+    sourceCharts = _cdCanonicalCharts().filter(function(c){ return c && Array.isArray(c.entries) && _chartDay(c)!==_tk; });
   } else {
     var _tk2=_dayKey();
-    sourceCharts = _cdCanonicalCharts().filter(function(c){ return c && String(c.id)===String(filterChartId) && _cdNameDayKey(c.name)!==_tk2; });
+    sourceCharts = _cdCanonicalCharts().filter(function(c){ return c && String(c.id)===String(filterChartId) && _chartDay(c)!==_tk2; });
   }
   var items = [];
   sourceCharts.forEach(function(c){
@@ -5217,7 +5324,7 @@ function _cdBuildItems(filterChartId){
       var idRef  = _cdSrcRef(e);             // 'id:..' or 'sig:..'
       var sigRef = 'sig:' + _cdSig(e);
       var skRef = 'sk:'+_cdCustAmtKey(e);                       // customer+amount (day-agnostic)
-      var dayRef = skRef+'@'+_cdNameDayKey(c.name);             // ...scoped to THIS source day
+      var dayRef = skRef+'@'+_chartDay(c);                      // ...scoped to THIS source day
       if(carried[idRef] || carried[sigRef] || carried[skRef]) return;   // already carried into today (any device, by customer+amount)
       if(dismissed[idRef] || dismissed[sigRef] || dismissed[dayRef]) return; // user removed it (on ANY device)
       var info = _cdComputeUnalloc(e);
@@ -5234,14 +5341,14 @@ function _cdBuildItems(filterChartId){
 // The default C/D source = the most recent chart strictly before today
 // (i.e. the previous working day). Returns its chartId, or null if none.
 function _cdDefaultSourceId(){
-  var todayStr = _todayDateStr();  // same format saved chart names use (consistent comparison)
+  var tk = _dayKey();
   var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
-  var best = null, bestTime = -1;
+  var best = null, bestDay = '';
   charts.forEach(function(c){
     if(!c || !Array.isArray(c.entries)) return;
-    if(c.name && c.name.trim() === todayStr) return;  // exclude today
-    var t = c.date ? new Date(c.date).getTime() : 0;
-    if(t > bestTime){ bestTime = t; best = c.id; }
+    var d = _chartDay(c);
+    if(!d || d >= tk) return;  // exclude today/future (by day, not name string)
+    if(d > bestDay){ bestDay = d; best = c.id; }
   });
   return best;
 }
@@ -5636,8 +5743,8 @@ function _cdRefixTodayV1(){
       var bk = JSON.parse(localStorage.getItem('mg_overwrite_backups')||'[]');
       bk.unshift({ ts:Date.now(), replacedAt:new Date().toISOString(),
         original:{ id:'cdrefix_'+Date.now(), name:'CD错带入修复前备份', date:new Date().toISOString(),
-                   entries:ent, charts:JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]') } });
-      localStorage.setItem('mg_overwrite_backups', JSON.stringify(bk.slice(0,14)));
+                   entries:ent } });
+      localStorage.setItem('mg_overwrite_backups', JSON.stringify(bk.slice(0,5)));
     } catch(e){}
     entries = ent.filter(function(e){ return !isFreshCarry(e); });   // keep manual + already-worked carries
     if(wrong.length && typeof _addTombstones==='function') _addTombstones(wrong.map(function(e){ return e._id; }).filter(Boolean));
@@ -5667,7 +5774,7 @@ function _cdRefixTodayV1(){
 function _cdEnforceDismissals(){
   try{
     if(!Array.isArray(entries)) return;
-    if(currentChartName && currentChartName.trim() !== _todayDateStr()) return;   // only on today
+    if(currentChartName && (_cdNameDayKey(currentChartName)||_dayKey()) !== _dayKey()) return;   // only on today (parsed day)
     if(typeof _mgBusy==='function' && _mgBusy()) return;                          // don't disrupt the operator
     var dismissed = _cdDismissedSet();
     function allocOf(e){ return (e.act||0)+(e.yes||0)+(e.hs||0)+(e.cash||0)+(e.btHeng||0); }
@@ -5695,7 +5802,7 @@ function _cdRemoveSelfCarryV1(){
   try{
     if(_dayKey() > '2026-07-25') return;   // transition-period cleanup only (root cause already fixed)
     if(!Array.isArray(entries)) return;
-    if(currentChartName && currentChartName.trim() !== _todayDateStr()) return;   // only while on today
+    if(currentChartName && (_cdNameDayKey(currentChartName)||_dayKey()) !== _dayKey()) return;   // only while on today (parsed day)
     var now=new Date(), td=now.getDate(), tm=now.getMonth()+1;
     var wrong=entries.filter(function(e){
       if(!e||!e.isCD||!e.name) return false;
@@ -5707,7 +5814,7 @@ function _cdRemoveSelfCarryV1(){
     if(firstTime){ try { var bk=JSON.parse(localStorage.getItem('mg_overwrite_backups')||'[]');
       bk.unshift({ ts:Date.now(), replacedAt:new Date().toISOString(), reason:'selfcarry_strip',
         original:{ id:'sc_'+Date.now(), name:'自带自己清理前备份', date:new Date().toISOString(), entries:entries.slice() } });
-      localStorage.setItem('mg_overwrite_backups', JSON.stringify(bk.slice(0,14))); localStorage.setItem('mg_selfcarry_backed','1'); } catch(e){} }
+      localStorage.setItem('mg_overwrite_backups', JSON.stringify(bk.slice(0,5))); localStorage.setItem('mg_selfcarry_backed','1'); } catch(e){} }
     var ids=wrong.map(function(e){return e._id;}).filter(Boolean);
     if(typeof _addTombstones==='function') _addTombstones(ids);   // make the removal stick across sync
     var wid={}; ids.forEach(function(i){ wid[i]=1; });
@@ -5752,8 +5859,9 @@ function _cdDedupeChartsV1(){
     try {
       var bk = JSON.parse(localStorage.getItem('mg_overwrite_backups')||'[]');
       bk.unshift({ ts: Date.now(), replacedAt: new Date().toISOString(), reason: 'dedupe_charts_v1',
-                   original: { id:'dedupe_'+Date.now(), name:'重复表清理前备份', date:new Date().toISOString(), entries:[], charts: orig } });
-      localStorage.setItem('mg_overwrite_backups', JSON.stringify(bk.slice(0,14)));
+                   original: { id:'dedupe_'+Date.now(), name:'重复表清理前备份', date:new Date().toISOString(),
+                               entries:(JSON.parse(localStorage.getItem(ENTRIES_KEY)||'[]')||[]) } });
+      localStorage.setItem('mg_overwrite_backups', JSON.stringify(bk.slice(0,5)));
     } catch(e){}
     safeSetItem(CHARTS_KEY, JSON.stringify(merged));
     localStorage.setItem('mg_cd_dedupe_v1','done');
@@ -5795,7 +5903,7 @@ function _cdFixV1(){
     }
     // 3) drop them from today's chart too
     if(Array.isArray(charts)){
-      charts.forEach(function(c){ if(c && c.name && c.name.trim()===todayName && Array.isArray(c.entries)) c.entries = c.entries.filter(function(e){ return !carried(e); }); });
+      charts.forEach(function(c){ if(c && _chartDay(c)===_dayKey() && Array.isArray(c.entries)) c.entries = c.entries.filter(function(e){ return !carried(e); }); });
       safeSetItem(CHARTS_KEY, JSON.stringify(charts));
     }
     // 4) tombstone removed ids so sync won't bring them back on other devices
@@ -5947,26 +6055,20 @@ function _cdSyncChain(pivot){
     // PERF: only carried rows (cdSource) or edits to a PAST day need chain syncing. A normal
     // today entry has no source and no descendant (today is the latest chart), so skip the
     // expensive full-chart scans — this is the common case on every allocation click.
-    var _onToday = (!currentChartName || currentChartName.trim()===_todayDateStr());
+    var _onToday = (!currentChartName || (_cdNameDayKey(currentChartName)||_dayKey())===_dayKey());
     if(!pivot.cdSource && _onToday) return;
     var start=_cdStartKey();
     var dirty={};        // chartId -> chart object to write back
     var liveDirty=false;
     var guard, visited;
 
-    // BACKWARD — align ancestors so each source's remaining == its child's amount.
-    guard=0; visited={}; var cur=pivot;
-    while(cur && cur.cdSource && guard++<60){
-      var f=_cdFindSource(cur.cdSource);
-      if(!f || !f.entry || !f.chart) break;
-      if(_cdChartDateKey(f.chart) < start) break;          // never rewrite pre-start history
-      var S=f.entry; if(visited[S._id]) break; visited[S._id]=1;
-      var want=(cur.amount||0)+_cdAllocSum(S);             // S.amount so that S.remaining == cur.amount
-      if((S.amount||0)!==want){ S.amount=want; _cdRecalcRm(S, f.chart.rates); S.updatedAt=Date.now(); dirty[f.chart.id]=f.chart; }
-      cur=S;
-    }
+    // LEDGER RULE: history is immutable from the present. The old BACKWARD pass here rewrote the
+    // SOURCE day's amount when today's carried copy was edited — silently changing historical
+    // totals. Removed. To fix a past mistake, open THAT day in History and edit the source; the
+    // FORWARD pass below then updates today's carried copy automatically.
+
     // FORWARD — align descendants so each carrier's amount == its parent's remaining.
-    guard=0; visited={}; cur=pivot;
+    guard=0; visited={}; var cur=pivot;
     while(cur && guard++<60){
       var car=_cdFindCarrier(cur);
       if(!car || !car.entry) break;
@@ -6113,7 +6215,7 @@ function _doSaveChart(name, overwriteId){
   } else {
     charts.unshift(newChart);
   }
-  if(charts.length > 365) charts.pop();
+  if(charts.length > 365){ var _oi2=0,_ok2='9999'; charts.forEach(function(c,i){ var d=_chartDay(c); if(d<_ok2){_ok2=d;_oi2=i;} }); charts.splice(_oi2,1); }
   var _chartOk = safeSetItem(CHARTS_KEY, JSON.stringify(charts));
   if(_chartOk === false && typeof _showErrorToast === 'function'){
     _showErrorToast('⚠️ 存储空间不足：图表可能未完整保存！请到「数据恢复」清理旧备份，云端仍会尝试同步。');
@@ -6182,7 +6284,8 @@ function exportTodayExcel(chartName){
     XLSX.utils.book_append_sheet(wb,ws,grp);
   });
   var ds = new Date().toLocaleDateString('en-MY',{day:'numeric',month:'numeric',year:'numeric'}).replace(/\//g,'-');
-  XLSX.writeFile(wb, 'Contra_'+(chartName||ds)+'.xlsx');
+  var _edk = _cdNameDayKey(chartName||'') || _dayKey();
+  XLSX.writeFile(wb, 'Contra_'+_dayToName(_edk).replace(/\//g,'-')+'_'+_dayWeekAbbr(_edk)+'.xlsx');
 }
 
 function saveChart(){
@@ -6283,7 +6386,7 @@ function loadChart(id, silent){
   if(typeof _bumpAction==='function') _bumpAction();   // explicit load = legitimate change
   // User manually loaded — mark this chart's date as active (prevents auto-rotation)
   if(c.date){
-    localStorage.setItem('mg_last_active_chart_date', _dayKey(c.date));
+    localStorage.setItem('mg_last_active_chart_date', _dayKey());
   }
   if(c.rates){ rates = _backfillRawRates({...c.rates}); populateRateInputs(); updateRatesTodayLabel(); }
   _setCurrentChart(c.id, c.name);
@@ -7110,7 +7213,7 @@ function exportPDF(printMode){
   const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260710114006 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260710225619 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
@@ -7181,10 +7284,10 @@ function _contraWorkbook(srcEntries){
 }
 function exportExcel(){
   if(typeof XLSX==='undefined'){ alert('XLSX library not loaded'); return; }
-  const now=new Date();
-  const todayDs = `${now.getDate()}-${now.getMonth()+1}-${now.getFullYear()}`;
-  const ds = (typeof currentChartName === 'string' && currentChartName.trim()) ? currentChartName.trim().replace(/\//g,'-') : todayDs;
-  XLSX.writeFile(_contraWorkbook(entries), `Contra_${ds}.xlsx`);
+  var dk = _cdNameDayKey(currentChartName||'') || _dayKey();
+  var ds = _dayToName(dk).replace(/\//g,'-');
+  var wd = _dayWeekAbbr(dk);
+  XLSX.writeFile(_contraWorkbook(entries), 'Contra_'+ds+(wd?'_'+wd:'')+'.xlsx');
 }
 
 // ======================================================
@@ -7197,14 +7300,15 @@ var _backupQueue = {};   // key (chartName|suffix) → {chart, suffix} — dedup
 function _downloadChartBackup(chart, suffix){
   try {
     if(typeof XLSX==='undefined' || !chart || !Array.isArray(chart.entries) || !chart.entries.length) return;
-    var nm = String(chart.name || _dayKey(chart.date)).trim().replace(/\//g,'-');
-    XLSX.writeFile(_contraWorkbook(chart.entries), 'Contra_'+nm+(suffix||'')+'.xlsx');
+    var dk = _chartDay(chart);
+    var nm = (_dayToName(dk)||String(chart.name||'')).replace(/\//g,'-');
+    var wd = _dayWeekAbbr(dk);
+    XLSX.writeFile(_contraWorkbook(chart.entries), 'Contra_'+nm+(wd?'_'+wd:'')+(suffix||'')+'.xlsx');
   } catch(e){ console.warn('backup download failed:', e); }
 }
 function _queueBackup(chart, suffix){
   if(!chart) return;
-  var nm = String(chart.name || _dayKey(chart.date)).trim();
-  _backupQueue[nm+'|'+(suffix||'')] = { chart:chart, suffix:suffix||'' };
+  _backupQueue[_chartDay(chart)+'|'+(suffix||'')] = { chart:chart, suffix:suffix||'' };
 }
 function _flushBackupQueue(){
   var keys = Object.keys(_backupQueue);
@@ -7219,10 +7323,16 @@ if(typeof document!=='undefined'){
 }
 // A chart's business day is its NAME (e.g. "29/6/2026") — NOT its `date` field, which
 // _persistCurrentChart rewrites to "now" on every save. So match recent days by name.
-function _dayNameForOffset(off){ try { return new Date(Date.now()-off*86400000).toLocaleDateString('en-MY',{day:'numeric',month:'numeric',year:'numeric'}); } catch(e){ return ''; } }
+function _dayNameForOffset(off){ return _dayToName(_dayKey(Date.now()-off*86400000)); }
+function _chartForDayOffset(off){
+  var dk=_dayKey(Date.now()-off*86400000);
+  try { return (JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]')||[]).find(function(c){ return c && Array.isArray(c.entries) && _chartDay(c)===dk; }) || null; }
+  catch(e){ return null; }
+}
 function _chartForDayName(nm){
-  nm = String(nm||'').trim();
-  try { return (JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]')||[]).find(function(c){ return c && Array.isArray(c.entries) && (typeof _cdBaseDay==='function'?_cdBaseDay(c.name):String(c.name||'').trim())===nm; }) || null; }
+  var dk = _cdNameDayKey(nm);
+  if(!dk) return null;
+  try { return (JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]')||[]).find(function(c){ return c && Array.isArray(c.entries) && _chartDay(c)===dk; }) || null; }
   catch(e){ return null; }
 }
 function _backupDoneMap(){ try { return JSON.parse(localStorage.getItem('mg_backup_done')||'{}')||{}; } catch(e){ return {}; } }
@@ -7233,12 +7343,12 @@ function _markBackupDone(name){ try { var m=_backupDoneMap(), k=_dayKey(); var k
 function _autoBackupRecentDays(){
   try {
     [1,2].forEach(function(off){
-      var nm = _dayNameForOffset(off);
-      var c = _chartForDayName(nm);
+      var c = _chartForDayOffset(off);
       if(!c || !(c.entries||[]).length) return;
-      if(_isBackupDone(nm)) return;          // already downloaded today → don't re-download on refresh
+      var dk = _chartDay(c);
+      if(_isBackupDone(dk)) return;          // already downloaded today → don't re-download on refresh
       _queueBackup(c, '');
-      _markBackupDone(nm);
+      _markBackupDone(dk);
     });
   } catch(e){ console.warn('_autoBackupRecentDays failed:', e); }
 }
@@ -7246,7 +7356,7 @@ function _autoBackupRecentDays(){
 function backupRecentDaysNow(){
   try {
     var n=0;
-    [1,2].forEach(function(off){ var c=_chartForDayName(_dayNameForOffset(off)); if(c && (c.entries||[]).length){ _downloadChartBackup(c,''); n++; } });
+    [1,2].forEach(function(off){ var c=_chartForDayOffset(off); if(c && (c.entries||[]).length){ _downloadChartBackup(c,''); n++; } });
     if(typeof _showSuccessToast==='function') _showSuccessToast(n? ('已下载前两天备份 '+n+' 份') : '前两天没有可备份的表格');
   } catch(e){ console.warn(e); }
 }
@@ -7254,10 +7364,10 @@ function backupRecentDaysNow(){
 // backup of THAT day. Today's live editing never triggers this (today isn't part of "前两天").
 function _maybeQueueEditedDayBackup(){
   try {
-    var cur = (currentChartName||'').trim();
-    if(!cur || cur===_todayDateStr()) return;   // editing today → skip (no per-keystroke downloads)
-    if(cur===_dayNameForOffset(1) || cur===_dayNameForOffset(2)){
-      var c = _chartForDayName(cur);
+    var curDk = _cdNameDayKey(currentChartName||'');
+    if(!curDk || curDk===_dayKey()) return;     // editing today → skip (no per-keystroke downloads)
+    if(curDk===_dayKey(Date.now()-86400000) || curDk===_dayKey(Date.now()-2*86400000)){
+      var c = _chartForDayName(currentChartName);
       if(c) _queueBackup(c, '_new');
     }
   } catch(e){}
@@ -7751,14 +7861,40 @@ function _setupOfflineDetection(){
 // If today's chart already exists in history → load it.
 // Otherwise → start fresh blank chart with today's date as name.
 // ======================================================
+// FIXED format — deterministic on every device. The old toLocaleDateString('en-MY') rendered
+// "2/7/2026" on one device and "02/07/2026" on another, and since chart identity was the name
+// string, each device built its own "today" chart. Never use locale formatting for identity.
 function _todayDateStr(){
-  return new Date().toLocaleDateString('en-MY',{day:'numeric',month:'numeric',year:'numeric'});
+  return _dayToName(_dayKey());
 }
 // LOCAL calendar day key (YYYY-MM-DD). Use this for "today" comparisons instead of
 // toISOString() (which is UTC) — otherwise early-morning work in UTC+8 sees the wrong day.
 function _dayKey(dt){
   var d = dt ? new Date(dt) : new Date();
   return d.getFullYear()+'-'+('0'+(d.getMonth()+1)).slice(-2)+'-'+('0'+d.getDate()).slice(-2);
+}
+// Canonical display name for a day key: "dd/mm/yyyy" (zero-padded, fixed).
+function _dayToName(dayKey){
+  var m = String(dayKey||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if(!m) return String(dayKey||'');
+  return m[3]+'/'+m[2]+'/'+m[1];
+}
+// Weekday abbreviation for a day key ("Mon".."Sun") — used in export/backup filenames.
+function _dayWeekAbbr(dayKey){
+  try { var m=String(dayKey||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    var d = m ? new Date(+m[1], +m[2]-1, +m[3]) : new Date();
+    return ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'][d.getDay()];
+  } catch(e){ return ''; }
+}
+// THE chart-day accessor — single source of truth for "which business day is this chart".
+// Prefers the immutable c.day (stamped at creation / by migration); falls back to parsing the
+// name; last resort the (edit-polluted) date. NEVER compare chart names or c.date for day logic.
+function _chartDay(c){
+  if(!c) return '';
+  if(c.day && /^\d{4}-\d{2}-\d{2}$/.test(c.day)) return c.day;
+  var k = (typeof _cdNameDayKey==='function') ? _cdNameDayKey(c.name) : '';
+  if(k) return k;
+  try { return _dayKey(c.date); } catch(e){ return ''; }
 }
 
 // ─── ONE-TIME CLEANUP: Remove all CD deletion markers from a previous buggy version ───
@@ -8095,9 +8231,9 @@ function _checkDailyChartRotation(){
   var todayKey = _dayKey();   // LOCAL day — consistent with todayName (also local)
   var lastActiveDate = localStorage.getItem('mg_last_active_chart_date') || '';
 
-  // Determine if currently-loaded chart is today's
+  // Determine if currently-loaded chart is today's (by PARSED day — format-proof)
   var loadedIsToday = false;
-  if(currentChartName && currentChartName.trim() === todayName){
+  if(currentChartName && (_cdNameDayKey(currentChartName)||'') === todayKey){
     loadedIsToday = true;
   }
 
@@ -8110,7 +8246,7 @@ function _checkDailyChartRotation(){
   // do NOT auto-rotate away from it — otherwise a coinciding rotation/pull could
   // revert the load and force a second click. Stick with the loaded chart.
   if(_manualChartLoadAt && (Date.now() - _manualChartLoadAt) < 5*60*1000 &&
-     currentChartName && currentChartName.trim() !== todayName){
+     currentChartName && (_cdNameDayKey(currentChartName)||'') !== todayKey){
     return;
   }
 
@@ -8121,7 +8257,7 @@ function _checkDailyChartRotation(){
   // snapshot would resurrect just-deleted/edited records after a refresh.
   if(!currentChartId && lastActiveDate === todayKey){
     var existingCharts2 = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
-    var todayCh = existingCharts2.find(function(c){ return c.name && c.name.trim() === todayName; });
+    var todayCh = existingCharts2.find(function(c){ return c && _chartDay(c) === todayKey; });
     if(todayCh){
       _setCurrentChart(todayCh.id, todayCh.name.trim());
       if(!entries || entries.length === 0){
@@ -8158,6 +8294,7 @@ function _checkDailyChartRotation(){
       _setCurrentChart(Date.now(), todayName);
       var firstChart = {
         id: currentChartId,
+        day: todayKey,
         name: todayName,
         date: new Date().toISOString(),
         entries: [],
@@ -8194,20 +8331,16 @@ function _checkDailyChartRotation(){
       catch(e){ console.warn('Force-save current failed:', e); }
     } else {
       // Truly unnamed unsaved work from a previous session — save under last active date
-      var saveAsName;
-      if(lastActiveDate){
-        saveAsName = new Date(lastActiveDate).toLocaleDateString('en-MY',{day:'numeric',month:'numeric',year:'numeric'});
-      } else {
-        saveAsName = new Date(Date.now()-86400000).toLocaleDateString('en-MY',{day:'numeric',month:'numeric',year:'numeric'});
-      }
+      // (fixed-format name derived from the day key; never locale-formatted)
+      var saveAsName = _dayToName(/^\d{4}-\d{2}-\d{2}$/.test(lastActiveDate) ? lastActiveDate : _dayKey(Date.now()-86400000));
       try { _doSaveChart(saveAsName, null); }
       catch(e){ console.warn('Force-save (unnamed) failed:', e); }
     }
   }
 
-  // Step 2: Reload charts and look for today's
+  // Step 2: Reload charts and look for today's (by day)
   charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
-  var todayChart = charts.find(function(c){ return c.name && c.name.trim() === todayName; });
+  var todayChart = charts.find(function(c){ return c && _chartDay(c) === todayKey; });
 
   if(todayChart){
     // Today's chart exists in history — load it
@@ -8223,6 +8356,7 @@ function _checkDailyChartRotation(){
     // Add the empty chart to history so it shows up
     var newTodayChart = {
       id: currentChartId,
+      day: todayKey,
       name: todayName,
       date: new Date().toISOString(),
       rotatedAt: todayKey,
@@ -8230,7 +8364,7 @@ function _checkDailyChartRotation(){
       rates: {sgd: rates.sgd||null, thb: rates.thb||null, idr: rates.idr||null, sgdThb: rates.sgdThb||null, sgdIdr: rates.sgdIdr||null}
     };
     charts.unshift(newTodayChart);
-    if(charts.length > 365) charts.pop();
+    if(charts.length > 365){ var _oi=0,_ok='9999'; charts.forEach(function(c,i){ var d=_chartDay(c); if(d<_ok){_ok=d;_oi=i;} }); charts.splice(_oi,1); }
     safeSetItem(CHARTS_KEY, JSON.stringify(charts));
     if(typeof markSaved === 'function') markSaved();
     // Push to Drive so other devices see today's empty chart too
@@ -9231,7 +9365,10 @@ function restoreOverwriteBackup(i){
   var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
   var restored = JSON.parse(JSON.stringify(c));
   restored.id = Date.now();  // new ID to avoid collision
-  restored.name = c.name + ' (恢复)';
+  // Stamp the SAME business day (and canonical name) so the union-merge folds this restored
+  // copy into the real day chart instead of leaving a permanent "(恢复)" duplicate.
+  restored.day = _chartDay(c);
+  restored.name = _dayToName(restored.day) || (c.name + ' (恢复)');
   charts.unshift(restored);
   if(charts.length > 60) charts.pop();
   safeSetItem(CHARTS_KEY, JSON.stringify(charts));
@@ -9877,8 +10014,7 @@ function renderHistoryList(charts){
   }
   // Sort by the BUSINESS DAY (parsed from the chart name), newest first — NOT by `date`, which
   // _persistCurrentChart rewrites to "now" on every save (so editing an old day made it jump).
-  var _cdt = function(c){ try{ return (typeof _custChartDate==='function') ? _custChartDate(c).getTime() : (c.date?new Date(c.date).getTime():0); }catch(_){ return 0; } };
-  charts = charts.slice().sort(function(a,b){ return _cdt(b) - _cdt(a); });
+  charts = charts.slice().sort(function(a,b){ var da=_chartDay(a), db=_chartDay(b); return db<da?-1:db>da?1:0; });
   el.innerHTML = charts.map(function(c,i){
     // Identify charts by their stable id (NOT array index) — mg_charts gets
     // re-sorted asynchronously by Drive sync, so a positional index can point
@@ -9999,7 +10135,7 @@ function editHistoryChart(id){
 function returnToToday(){
   var todayName = _todayDateStr();
   var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
-  var tc = charts.find(function(c){ return c.name && c.name.trim()===todayName; });
+  var tc = charts.find(function(c){ return c && _chartDay(c)===_dayKey(); });
   if(tc){
     entries = JSON.parse(JSON.stringify(tc.entries||[]));
     _setCurrentChart(tc.id, tc.name);
@@ -10144,7 +10280,7 @@ function _custEntryBalance(e){
 function _custEntrySettled(e){ var t=(e&&e.group==='RP')?0.5:0.005; return Math.abs(_custEntryBalance(e))<=t; }
 // A chart's business day comes from its NAME ("d/m/yyyy"), not its rewritten `date` field.
 function _custChartDate(c){
-  try { var m=String(c&&c.name||'').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); if(m) return new Date(+m[3],+m[2]-1,+m[1]); } catch(_){}
+  try { var d=_chartDay(c); var m=String(d).match(/^(\d{4})-(\d{2})-(\d{2})$/); if(m) return new Date(+m[1],+m[2]-1,+m[3]); } catch(_){}
   try { return new Date(c.date); } catch(_){ return new Date(0); }
 }
 function _custHistAmt(e){ return (e.group==='RP'||e.group==='THB')?(e.amount||0):(e.rmAmount||0); }
@@ -10358,6 +10494,8 @@ function init(){
   // After init delay, check if login required and trigger daily Excel backup
   setTimeout(function(){
     checkLoginRequiredOverlay();
+    if(typeof _storageDietV1 === 'function') _storageDietV1();          // one-time: shrink legacy backup bloat (frees quota)
+    if(typeof _normalizeChartsV1 === 'function') _normalizeChartsV1();  // day-key migration/normalization (idempotent, BEFORE rotation)
     _checkDailyChartRotation();
     if(typeof _cdSuppressTodayV1 === 'function') _cdSuppressTodayV1();  // one-time: protect today's hand-fixed records (no carry into today)
     if(typeof _cdDedupeChartsV1 === 'function') _cdDedupeChartsV1();   // one-time: collapse duplicate/(恢复) charts (backed up)
@@ -10630,7 +10768,7 @@ function MGApplyFix(id, patch){
   var _wRawC=null, _wCharts=null;   // PERF: cache parsed mg_charts; re-parse only when it changes
 
   function log(sev,code,msg){ try{var l=gj(LOG,[]); l.unshift({ts:Date.now(),sev:sev,code:code,msg:msg}); if(l.length>200)l=l.slice(0,200); sset(LOG,l);}catch(e){} }
-  function backup(reason){ try{var p=gj(BK,[]); p.unshift({ts:Date.now(),replacedAt:new Date().toISOString(),original:{id:'audit_'+Date.now(),name:'监管自动备份（'+reason+'）',date:new Date().toISOString(),entries:gj('mg_entries',[]),charts:gj('mg_charts',[])}}); if(p.length>14)p=p.slice(0,14); sset(BK,p);}catch(e){} }
+  function backup(reason){ try{var p=gj(BK,[]); p.unshift({ts:Date.now(),replacedAt:new Date().toISOString(),original:{id:'audit_'+Date.now(),name:'监管自动备份（'+reason+'）',date:new Date().toISOString(),entries:gj('mg_entries',[])}}); if(p.length>5)p=p.slice(0,5); sset(BK,p);}catch(e){} }
   // The ONLY business-data write: an auto-repair. Backs up first, then re-syncs the app.
   function writeEntries(arr,reason){ backup(reason); sset('mg_entries',arr); try{localStorage.setItem('mg_last_write',String(Date.now()));}catch(e){} try{localStorage.setItem('mg_action_seq',String(seq()+1));}catch(e){} if(typeof window.MGReloadEntries==='function') window.MGReloadEntries(); snap=null; }
 
@@ -10648,6 +10786,17 @@ function MGApplyFix(id, patch){
     var now=Date.now(), curSeq=seq();
     var oplog=gj('mg_oplog',[])||[];
     function recentOp(types,since){ return oplog.some(function(o){ return o&&types.indexOf(o.type)>=0 && (now-(o.ts||0))<since; }); }
+    // HUMAN-INTENT: did a person (or a legitimate app action) mutate data in the last N ms?
+    // The action counter alone proved fragile — one write path forgetting to bump it made the
+    // watchdog revert real work. The op-log is the authoritative record of intent, and the
+    // lastadd/lastdel markers cover the add/delete fast paths.
+    function humanRecent(since){
+      since = since || 10000;
+      if(recentOp(['add','delete','batch_delete','edit','merge','alloc','cd_import','cd_auto','clear','load','restore','undo','redo','sync_apply','monitor_fix'], since)) return true;
+      try { var la=gj('mg_lastadd',null); if(la && (now-(la.at||0))<since) return true; } catch(e){}
+      try { var ld=gj('mg_lastdel',null); if(ld && (now-(ld.at||0))<since) return true; } catch(e){}
+      return false;
+    }
 
     // R8 structural (high) — distinguish "key present but CORRUPT" from "absent".
     var rawE=localStorage.getItem('mg_entries'), rawC=localStorage.getItem('mg_charts');
@@ -10662,7 +10811,9 @@ function MGApplyFix(id, patch){
     if(!Array.isArray(entries)) return F;
 
     // ===== behaviour conservation (ghosts) — only when NO legitimate action happened =====
-    if(snap && curSeq===snap.seq){
+    // Double gate: the counter must be unmoved AND the op-log must show no recent human/app
+    // mutation. A ghost is a change with NO explanation on EITHER channel.
+    if(snap && curSeq===snap.seq && !humanRecent(10000)){
       var cur=buildSnap(entries);
       var added=[],removed=[];
       Object.keys(cur.ids).forEach(function(id){ if(!snap.ids[id]) added.push(id); });
@@ -10708,9 +10859,11 @@ function MGApplyFix(id, patch){
 
     // ===== content rules =====
     var tb=tomb();
-    var res=entries.filter(function(e){return e&&e._id&&tb[e._id]&&!(e.updatedAt&&e.updatedAt>tb[e._id]);});
+    function tAct(v){ if(!v) return false; if(typeof v==='number') return true; return !!(v.t && v.t > (v.c||0)); }
+    function tT(v){ return (typeof v==='number') ? v : ((v&&v.t)||0); }
+    var res=entries.filter(function(e){return e&&e._id&&tAct(tb[e._id])&&!(e.updatedAt&&e.updatedAt>tT(tb[e._id]));});
     if(res.length){ F.push({sev:'high',code:'resurrect',auto:true,msg:'删除的客户又出现（'+res.length+' 笔），已自动移除',
-      repair:function(){ var arr=(gj('mg_entries',[])||[]).filter(function(e){return !(e&&e._id&&tb[e._id]&&!(e.updatedAt&&e.updatedAt>tb[e._id]));}); writeEntries(arr,'删除复活清除'); }}); }
+      repair:function(){ var arr=(gj('mg_entries',[])||[]).filter(function(e){return !(e&&e._id&&tAct(tb[e._id])&&!(e.updatedAt&&e.updatedAt>tT(tb[e._id])));}); writeEntries(arr,'删除复活清除'); }}); }
 
     entries.forEach(function(e){
       if(!e||!e.conv||e.amountUserEdited) return;
@@ -10739,9 +10892,8 @@ function MGApplyFix(id, patch){
 
     // chart rules
     if(Array.isArray(charts)){
-      var nc={}; charts.forEach(function(c){ if(c&&c.name){var k=String(c.name).trim(); nc[k]=(nc[k]||0)+1;} });
-      var _tnAud=(function(){try{return new Date().toLocaleDateString('en-MY',{day:'numeric',month:'numeric',year:'numeric'});}catch(e){return '';}})();
-      Object.keys(nc).forEach(function(k){ if(nc[k]>=2) F.push({sev:(k===_tnAud?'med':'low'),code:'dupchart:'+k,msg:'有两张同一天（'+k+'）的表格'}); });
+      var nc={}; charts.forEach(function(c){ if(!c) return; var k=(c.day&&/^\d{4}-\d{2}-\d{2}$/.test(c.day))?c.day:(function(){var m=String(c.name||'').replace(/\s*\([^)]*\)\s*$/,'').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);return m?(m[3]+'-'+('0'+m[2]).slice(-2)+'-'+('0'+m[1]).slice(-2)):String(c.name||'').trim();})(); nc[k]=(nc[k]||0)+1; });
+      Object.keys(nc).forEach(function(k){ if(nc[k]>=2) F.push({sev:(k===dk()?'med':'low'),code:'dupchart:'+k,msg:'有两张同一天（'+k+'）的表格'}); });
     }
     // R7 whole-wipe — ONLY when TRULY unexplained: no app action (curSeq===snap.seq) AND no
     // delete/clear/load/sync op AND a SAME-DAY last-good to offer. This MUST NOT fire on the
