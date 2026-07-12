@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260710225619 -->
+<!-- MG Fishery Contra System v20260712102808 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260710225619';  /*BUILD*/
+window.__APP_VER__ = '20260712102808';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -1827,6 +1827,8 @@ function applySnapshot(data, applyEntries) {
   if(typeof _cdRemoveSelfCarryV1 === 'function'){ setTimeout(_cdRemoveSelfCarryV1, 200); }
   // A sync also brings other devices' deletions (as dismissals) — apply them to our carried rows.
   if(typeof _cdEnforceDismissals === 'function'){ setTimeout(_cdEnforceDismissals, 220); }
+  // ...and may union-in STALE-SOURCE carries from a behind device — strip them (tombstoned).
+  if(typeof _cdEnforceFreshCarries === 'function'){ setTimeout(_cdEnforceFreshCarries, 240); }
   // First successful pull merged in other devices' work → safe to auto-carry now (no dup carries).
   _mgFirstPullDone = true;
   if(typeof _maybeAutoCarry === 'function'){ setTimeout(_maybeAutoCarry, 250); }
@@ -4834,8 +4836,12 @@ function finalConfirm(){
       pushUndo();
       var gi=entries.findIndex(function(x){ return x._id===ex._id; });
       if(gi<0) gi=entries.indexOf(ex);
-      // MERGE-3: clear isCD flag — merged entry is now a live record, not pure C/D
+      // MERGE-3: merged entry is now a live record, not a pure carry — clear the flag AND strip
+      // the "[C/D fr …]" name tag (keeping it made users read the merged total as a wrong carry).
       entries[gi].isCD = false;
+      if(entries[gi].name) entries[gi].name = entries[gi].name.replace(/\s*\[C\/D fr [^\]]+\]/g,'').trim();
+      delete entries[gi].cdSource;
+      delete entries[gi].cdLive;
       if(ex.group==='RP'){
         entries[gi].amount=(ex.amount||0)+(entry.amount||0);
       } else if(ex.group==='THB'){
@@ -5288,13 +5294,15 @@ function _cdCarriedIntoTodaySet(){
 function _cdPrevDayChart(){
   var tk=_dayKey(), best=null, bestK='';
   _cdCanonicalCharts().forEach(function(c){
-    if(!c || !Array.isArray(c.entries)) return;
+    if(!c || !Array.isArray(c.entries) || !c.entries.length) return;  // EMPTY charts are not working days
     var ck=_chartDay(c);
     if(!ck || ck>=tk) return;                           // skip today and future — strictly a past day
     if(ck>bestK){ bestK=ck; best=c; }
   });
   return best;
 }
+// The last WORKING day's key (day of the prev-day chart) — the ONLY valid auto-carry source day.
+function _cdLatestPastDay(){ var p=_cdPrevDayChart(); return p ? _chartDay(p) : ''; }
 
 // C/D candidates. By DESIGN the default looks at ONLY the PREVIOUS day — a new day's table
 // carries the prior day's outstanding, never the whole accumulated history.
@@ -5565,6 +5573,7 @@ function confirmCD(){
       isCD: true,
       // Carry-link back to the source — this is how "already carried" is detected.
       // If this entry is later deleted/cleared, the source auto-reappears in C/D.
+      cdManual: true,   // operator chose this in the C/D modal — fresh-carry enforcement must never strip it
       cdSource: { id: src._id || null, sig: _cdSig(src), srcKey: _cdCustAmtKey(src),
                   srcDay: (typeof _cdNameDayKey==='function' ? _cdNameDayKey(it.chartName) : ''),
                   chartId: it.chartId, date: it.chartDate },
@@ -5670,6 +5679,17 @@ function _autoCarryCD(force){
     // Clean-start gate: only carry forward sources dated on/after the CD start day, so the
     // messy pre-start history is never pulled in.
     var startKey = (typeof _cdStartKey==='function') ? _cdStartKey() : '1970-01-01';
+    // OFFLINE GUARD — the 12/07 disaster: a device that hadn't synced since 10/07 hit the offline
+    // fallback and carried its STALE 10/07 view into today, which then union-merged everywhere.
+    // Without a confirmed Drive pull this session, only trust the local view if its last working
+    // day is literally CALENDAR YESTERDAY; otherwise the device is probably behind — wait for sync.
+    var _lp = (typeof _cdLatestPastDay==='function') ? _cdLatestPastDay() : '';
+    if(typeof _mgFirstPullDone!=='undefined' && !_mgFirstPullDone){
+      if(_lp !== _dayKey(Date.now()-86400000)){
+        if(typeof _logOp==='function') _logOp('cd_auto_skipped','离线且本地最新工作日('+_lp+')不是昨天，暂不自动带入，等待同步');
+        return;
+      }
+    }
     var items = (typeof _cdBuildItems === 'function') ? _cdBuildItems(null) : [];
     items = items.filter(function(it){ var dk=''; try{ dk=_dayKey(it.chartDate); }catch(_){}; return dk && dk>=startKey; });
     if(!items.length) return;   // nothing outstanding to carry (or everything already in today)
@@ -5767,6 +5787,72 @@ function _cdRefixTodayV1(){
 // ── ONE-TIME cleanup — remove "self-carry" rows: carried-in rows tagged "[C/D fr <today>]"
 // (the prev-day-by-c.date bug carried today's own leftovers back into today). Only removes rows
 // whose source day == today; genuine "[C/D fr yesterday]" carries are kept. Backed up first. ──
+// A carried row's source day: prefer the stamped cdSource.srcDay; legacy rows fall back to
+// parsing the "[C/D fr d/m]" name tag (year inferred; a parsed day in the future = last year).
+function _cdRowSrcDay(e){
+  try {
+    if(e && e.cdSource && /^\d{4}-\d{2}-\d{2}$/.test(e.cdSource.srcDay||'')) return e.cdSource.srcDay;
+    var m = String(e&&e.name||'').match(/\[C\/D fr\s*(\d{1,2})\/(\d{1,2})(?:\/(\d{4}))?/);
+    if(!m) return '';
+    var y = m[3] ? +m[3] : (new Date()).getFullYear();
+    var k = y+'-'+('0'+m[2]).slice(-2)+'-'+('0'+m[1]).slice(-2);
+    if(!m[3] && k > _dayKey()) k = (y-1)+k.slice(4);   // "fr 30/12" seen in January = last year
+    return k;
+  } catch(_){ return ''; }
+}
+
+// FRESH-CARRY ENFORCEMENT — the structural guarantee behind "CD 只带上一个工作日":
+// any AUTO-carried row in today whose source day is OLDER than the last working day is invalid
+// (it came from a stale/unsynced device view — e.g. an offline tablet carrying its old 10/07
+// into 12/07 — and typically DUPLICATES the legit carry). Strip it, tombstone it (so sync can't
+// bring it back), and it stays gone on every device. Safety lines: rows the operator has
+// allocated on, and rows imported MANUALLY via the C/D modal (cdManual), are never touched.
+// Idempotent; runs on open and after every sync.
+function _cdEnforceFreshCarries(){
+  try {
+    if(!Array.isArray(entries)) return;
+    if(currentChartName && (_cdNameDayKey(currentChartName)||_dayKey()) !== _dayKey()) return;   // only on today
+    if(typeof _mgBusy==='function' && _mgBusy()) return;
+    var latest = _cdLatestPastDay();
+    if(!latest) return;
+    function allocOf(e){ return (e.act||0)+(e.yes||0)+(e.hs||0)+(e.cash||0)+(e.btHeng||0); }
+    var stale = entries.filter(function(e){
+      if(!e || !e.isCD || e.cdManual) return false;
+      if(allocOf(e) !== 0) return false;                 // operator worked on it → keep
+      var sd = _cdRowSrcDay(e);
+      return sd && sd < latest;                          // carried from BEFORE the last working day
+    });
+    // DUPLICATE-CARRY COLLAPSE — two devices auto-carrying near-simultaneously each create their
+    // own copy (different _id) of the SAME source; the union merge keeps both. Group today's
+    // carried rows by source identity and keep ONE deterministically (a worked-on copy wins;
+    // otherwise the smallest _id — same rule on every device → all devices converge to the same
+    // survivor). The stripped copies are tombstoned so they can't sync back.
+    var groups = {};
+    entries.forEach(function(e){
+      if(!e || !e.isCD || e.cdManual) return;
+      var key = (e.cdSource && e.cdSource.srcKey) ? (e.cdSource.srcKey+'@'+(e.cdSource.srcDay||'')) : (_cdCustAmtKey(e)+'@'+_cdRowSrcDay(e));
+      (groups[key]=groups[key]||[]).push(e);
+    });
+    Object.keys(groups).forEach(function(k){
+      var g = groups[k];
+      if(g.length < 2) return;
+      var worked = g.filter(function(e){ return allocOf(e)!==0; });
+      var keeper = worked.length ? worked.sort(function(a,b){ return String(a._id)<String(b._id)?-1:1; })[0]
+                                 : g.slice().sort(function(a,b){ return String(a._id)<String(b._id)?-1:1; })[0];
+      g.forEach(function(e){ if(e!==keeper && allocOf(e)===0 && stale.indexOf(e)<0) stale.push(e); });
+    });
+    if(!stale.length) return;
+    var ids = stale.map(function(e){ return e._id; }).filter(Boolean);
+    if(typeof _addTombstones==='function') _addTombstones(ids);
+    var wid={}; ids.forEach(function(i){ wid[i]=1; });
+    entries = entries.filter(function(e){ return !(e&&e._id&&wid[e._id]); });
+    if(typeof _logOp==='function') _logOp('cd_stale_strip','清除 '+ids.length+' 条过期来源的带入（来源早于上一工作日 '+latest+'）');
+    if(typeof saveEntries==='function') saveEntries();
+    if(typeof renderAll==='function') renderAll();
+    if(typeof _showSuccessToast==='function') _showSuccessToast('已清除 '+ids.length+' 条「过期来源」的错误带入（仅允许来自 '+_dayToName(latest)+'）');
+  } catch(e){ console.warn('_cdEnforceFreshCarries failed:', e); }
+}
+
 // CROSS-DEVICE DELETE CONVERGENCE — if a carried row's SOURCE was dismissed (someone deleted that
 // row on ANY device; the dismissal syncs via mg_cd_dismissed), remove it here too. Safety line:
 // only if the row is UNTOUCHED (no allocations) — never destroy work someone already did on it.
@@ -7213,7 +7299,7 @@ function exportPDF(printMode){
   const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260710225619 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260712102808 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
@@ -10504,6 +10590,7 @@ function init(){
     if(typeof _cdRefixTodayV1 === 'function') _cdRefixTodayV1();   // one-time fix for today's wrong auto-carries
     if(typeof _cdRemoveSelfCarryV1 === 'function') _cdRemoveSelfCarryV1();   // remove "self-carry" rows (fr today)
     if(typeof _cdEnforceDismissals === 'function') _cdEnforceDismissals();   // apply other devices' deletions
+    if(typeof _cdEnforceFreshCarries === 'function') _cdEnforceFreshCarries();  // strip stale-source carries (only last working day is valid)
     _mgRotationDone = true;                          // today's chart is ready
     if(typeof _maybeAutoCarry === 'function'){
       _maybeAutoCarry();                             // if the first pull already landed, carry now
@@ -10812,7 +10899,14 @@ function MGApplyFix(id, patch){
 
     // ===== behaviour conservation (ghosts) — only when NO legitimate action happened =====
     // Double gate: the counter must be unmoved AND the op-log must show no recent human/app
-    // mutation. A ghost is a change with NO explanation on EITHER channel.
+    // mutation. If the op-log DOES explain the change, ADOPT it as the new baseline (just
+    // skipping would revert it later when the grace window expires).
+    if(snap && curSeq===snap.seq && humanRecent(10000)){
+      var _curChk=buildSnap(entries);
+      if(JSON.stringify(_curChk.ids)!==JSON.stringify(snap.ids) || JSON.stringify(_curChk.fields)!==JSON.stringify(snap.fields) || _curChk.rates!==snap.rates){
+        snap=null;   // tick() re-baselines from the current (explained) state
+      }
+    }
     if(snap && curSeq===snap.seq && !humanRecent(10000)){
       var cur=buildSnap(entries);
       var added=[],removed=[];
