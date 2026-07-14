@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260712102808 -->
+<!-- MG Fishery Contra System v20260714130405 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260712102808';  /*BUILD*/
+window.__APP_VER__ = '20260714130405';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -1534,7 +1534,13 @@ function _mergeChartPair(a, b){
       if(_isTodayChart && e._id && _tombActive(tomb[e._id]) && !(e.updatedAt && e.updatedAt > _tombTime(tomb[e._id]))) return;
       var k=_entryKey(e);
       if(!(k in byKey)){ byKey[k]=e; order.push(k); }
-      else if(isPrimary){ byKey[k]=e; }
+      else {
+        // PER-ROW conflict resolution: the copy edited LAST wins (hide toggles, allocations…),
+        // regardless of which chart blob happens to be "newer" — chart-level wins lost edits.
+        var cur=byKey[k];
+        var eu=e.updatedAt||0, cu=cur.updatedAt||0;
+        if(eu>cu || (eu===cu && isPrimary)) byKey[k]=e;
+      }
     });
   }
   add(primary.entries, true);
@@ -4102,6 +4108,7 @@ function deleteEntry(id){
   // R10 intent marker: record the id we're deleting so the watchdog can verify the
   // delete actually took effect (and re-apply / alert if the row is still there).
   try { localStorage.setItem('mg_lastdel', JSON.stringify({ at:Date.now(), ids:[_delId] })); } catch(e){}
+  try { var _la=JSON.parse(localStorage.getItem('mg_lastadd')||'null'); if(_la&&_la.entry&&_la.entry._id===_delId) localStorage.removeItem('mg_lastadd'); } catch(e){}
   entries.splice(idx,1);
   if(_delId) _addTombstones([_delId]);   // deletion sticks across devices
   // If this was a carried-in (C/D) row, dismiss its SOURCE too — otherwise the idempotent
@@ -4836,11 +4843,13 @@ function finalConfirm(){
       pushUndo();
       var gi=entries.findIndex(function(x){ return x._id===ex._id; });
       if(gi<0) gi=entries.indexOf(ex);
-      // MERGE-3: merged entry is now a live record, not a pure carry — clear the flag AND strip
-      // the "[C/D fr …]" name tag (keeping it made users read the merged total as a wrong carry).
+      // MERGE-3: merged entry is a live record now (carry + new deal). Strip the tag and clear
+      // isCD, but KEEP cdSource with a cdMerged marker — the carried-into-today set reads
+      // cdSource to know the source is already represented today; deleting it made auto-carry
+      // bring the old balance in AGAIN (the "one pre-merge + one post-merge row" bug).
       entries[gi].isCD = false;
+      entries[gi].cdMerged = true;
       if(entries[gi].name) entries[gi].name = entries[gi].name.replace(/\s*\[C\/D fr [^\]]+\]/g,'').trim();
-      delete entries[gi].cdSource;
       delete entries[gi].cdLive;
       if(ex.group==='RP'){
         entries[gi].amount=(ex.amount||0)+(entry.amount||0);
@@ -5328,7 +5337,10 @@ function _cdBuildItems(filterChartId){
   sourceCharts.forEach(function(c){
     if(!c || !Array.isArray(c.entries)) return;
     c.entries.forEach(function(e, eIdx){
-      if(!e || e.hidden || e.cdHidden) return;
+      // NOTE: e.hidden does NOT exclude a row from C/D — hiding means "already sent to the
+      // remitter today", not "settled". An outstanding balance must still carry tomorrow
+      // (the carried copy is a fresh, VISIBLE row — a new day is a new send-batch).
+      if(!e || e.cdHidden) return;
       var idRef  = _cdSrcRef(e);             // 'id:..' or 'sig:..'
       var sigRef = 'sig:' + _cdSig(e);
       var skRef = 'sk:'+_cdCustAmtKey(e);                       // customer+amount (day-agnostic)
@@ -6127,7 +6139,7 @@ function _cdRecalcRm(e, ratesObj){
 function _cdFindCarrier(node){
   if(!node) return null;
   var nid=node._id, nsig=(typeof _cdSig==='function')?_cdSig(node):'';
-  function match(e){ return e && e.cdSource && ((nid && e.cdSource.id===nid) || (e.cdSource.sig && nsig && e.cdSource.sig===nsig)); }
+  function match(e){ return e && e.cdSource && e.isCD && !e.cdMerged && ((nid && e.cdSource.id===nid) || (e.cdSource.sig && nsig && e.cdSource.sig===nsig)); }
   for(var i=0;i<entries.length;i++){ if(match(entries[i]) && entries[i]!==node) return {entry:entries[i], where:'live'}; }
   var charts=JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
   for(var c=0;c<charts.length;c++){ var ch=charts[c]; if(!ch||!Array.isArray(ch.entries)) continue; for(var j=0;j<ch.entries.length;j++){ if(match(ch.entries[j])) return {entry:ch.entries[j], where:ch}; } }
@@ -6184,7 +6196,11 @@ function cdCompareReport(){
     var carriedAmt = e.amount||0;
     var src = _cdFindSource(e.cdSource);
     var status, srcRemStr='—', srcInfo='（找不到来源）';
-    if(!src){
+    if(e.cdMerged || !e.isCD){
+      status = '🔀 已并入新交易（非错误）';
+      var src0 = _cdFindSource(e.cdSource);
+      if(src0){ var i0=_cdComputeUnalloc(src0.entry); srcRemStr=_fmtByGroup(e.group, e.currency, i0?i0.remaining:0); srcInfo=(src0.chart.name||''); }
+    } else if(!src){
       status = '⚠️ 来源缺失';
     } else {
       var info = _cdComputeUnalloc(src.entry);
@@ -7299,7 +7315,7 @@ function exportPDF(printMode){
   const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260712102808 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260714130405 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
@@ -9880,6 +9896,8 @@ function toggleHideEntry(id){
   var idx = entries.findIndex(function(x){return x._id===id;});
   if(idx<0) return;
   entries[idx].hidden = !entries[idx].hidden;
+  entries[idx].updatedAt = Date.now();   // hide/unhide is an EDIT — must win sync conflicts
+  if(typeof _logOp==='function') _logOp('edit', (entries[idx].hidden?'隐藏':'取消隐藏')+'：'+(entries[idx].name||''));
   saveEntries(); renderAll();
 }
 
@@ -9918,6 +9936,7 @@ function batchDelete(){
   pushUndo();
   var _delIds = Array.from(_batchSelected);
   try { localStorage.setItem('mg_lastdel', JSON.stringify({ at:Date.now(), ids:_delIds })); } catch(e){}  // R10 intent
+  try { var _la2=JSON.parse(localStorage.getItem('mg_lastadd')||'null'); if(_la2&&_la2.entry&&_delIds.indexOf(_la2.entry._id)>=0) localStorage.removeItem('mg_lastadd'); } catch(e){}
   // Dismiss the SOURCE of any carried-in rows being deleted, so auto-carry won't bring them back
   // (srcKey included → the dismissal also applies on other devices).
   var _delSrefs=[];
@@ -10935,7 +10954,11 @@ function MGApplyFix(id, patch){
     var la=gj('mg_lastadd',null);
     if(la&&la.entry&&la.entry._id&&(now-(la.at||0))<8000){
       var present=entries.some(function(e){return e&&e._id===la.entry._id;});
-      if(!present&&(now-(la.at||0))>1500){
+      // If the id was DELETED (active tombstone), the user removed it on purpose right after
+      // adding — "recovering" it would resurrect a deleted row. Clear the marker instead.
+      var _laT=tomb()[la.entry._id];
+      if(_laT && (typeof _laT==='number' ? true : (_laT.t && _laT.t>(_laT.c||0)))){ try{localStorage.removeItem('mg_lastadd');}catch(e){} }
+      else if(!present&&(now-(la.at||0))>1500){
         F.push({sev:'high',code:'lost_add',auto:true,msg:'刚录入的「'+(la.entry.name||'')+'」没成功加入，已自动补回',
           repair:function(){ var arr=gj('mg_entries',[])||[]; if(!arr.some(function(e){return e&&e._id===la.entry._id;})){ arr.push(la.entry); writeEntries(arr,'录入丢失补回'); } try{localStorage.removeItem('mg_lastadd');}catch(e){} }});
       } else if(present){ try{localStorage.removeItem('mg_lastadd');}catch(e){} }
