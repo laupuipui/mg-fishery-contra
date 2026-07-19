@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260714130405 -->
+<!-- MG Fishery Contra System v20260720002649 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260714130405';  /*BUILD*/
+window.__APP_VER__ = '20260720002649';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -549,6 +549,10 @@ body.fs-sm .contra-table th{font-size:9px}
 body.fs-lg{font-size:15px}
 body.fs-lg .contra-table td{font-size:14px;padding:8px 10px}
 body.fs-lg .alloc-input{font-size:14px}
+/* 平板/窄屏:表格在自身容器内横向滚动,页面主体绝不左右晃 */
+@media (max-width:900px){
+  .contra-table{display:block;overflow-x:auto;max-width:100%;-webkit-overflow-scrolling:touch}
+}
 /* Shortcut badge */
 .shortcut-badge{
   font-size:9px;font-family:'IBM Plex Mono',monospace;
@@ -630,6 +634,7 @@ body.fs-lg .alloc-input{font-size:14px}
     <button class="tb-btn icon" id="btn-undo" onclick="undoEntry()" disabled title="Undo">↩</button>
     <button class="tb-btn icon" id="btn-redo" onclick="redoEntry()" disabled title="Redo">↪</button>
     <button class="tb-btn teal" onclick="openHistory()" data-i="btn_history">📁 历史</button>
+    <button class="tb-btn" onclick="openOwnerPanel()" title="Owner 账本:来银/付款/余额" style="color:#f0b429;border-color:rgba(240,180,41,.35)">💼 Owner</button>
     <button class="tb-btn" onclick="openTableSearch()" id="btn-table-search" title="搜索客户 (Ctrl+F)" style="color:var(--accent);border-color:rgba(0,200,240,.35)">🔍</button>
     <button class="tb-btn red" id="btn-clear" onclick="confirmClear()" data-i="btn_clear">🗑 清空</button>
   </div>
@@ -944,6 +949,14 @@ body.fs-lg .alloc-input{font-size:14px}
     <span class="si-ico">📈</span>
     <span class="si-lbl">统计报告<span class="si-sub">按日期范围统计</span></span>
   </button>
+  <button class="sidebar-item" onclick="openRatesHistory();closeSidebar()">
+    <span class="si-ico">💱</span>
+    <span class="si-lbl">汇率历史<span class="si-sub">查看过往每日汇率</span></span>
+  </button>
+  <button class="sidebar-item" onclick="toggleRowAuditVisible()">
+    <span class="si-ico">📜</span>
+    <span class="si-lbl">操作履历按钮<span class="si-sub" id="row-audit-state">当前：隐藏</span></span>
+  </button>
   <button class="sidebar-item" onclick="openCustomerHistory('');closeSidebar()">
     <span class="si-ico">👤</span>
     <span class="si-lbl">客户历史<span class="si-sub">查看客户交易记录</span></span>
@@ -1203,6 +1216,25 @@ body.fs-lg .alloc-input{font-size:14px}
     <h2 id="cust-hist-title">客户交易历史</h2>
     <div id="cust-hist-body" style="max-height:70vh;overflow:auto"></div>
     <div class="btn-row"><button class="btn-secondary" onclick="closeModal('modal-cust-hist')">关闭</button></div>
+  </div>
+</div>
+<!-- ═══ OWNER 独立界面(全屏,非浮窗) ═══ -->
+<style>
+@media (max-width:760px){
+  #owner-flex{flex-direction:column!important}
+  #owner-side{width:100%!important;border-right:none!important;border-bottom:1.5px solid var(--border);display:flex;overflow-x:auto;gap:6px}
+  #owner-side>div{min-width:130px;flex-shrink:0;margin-bottom:0!important}
+}
+</style>
+<div id="owner-screen" style="display:none;position:fixed;inset:0;z-index:8000;background:var(--bg);overflow:auto">
+  <div style="position:sticky;top:0;z-index:10;background:var(--surface);border-bottom:1.5px solid var(--border2);padding:10px 16px;display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    <button class="btn-secondary" onclick="closeOwnerScreen()" style="font-size:13px;padding:7px 14px">← 返回记账</button>
+    <span style="font-weight:800;font-size:16px">💼 Owner 账本</span>
+    <span style="font-size:11px;color:var(--text3)">余额=期初+交易−来银+付款 · 分币种 · 交易自动入账</span>
+  </div>
+  <div id="owner-flex" style="display:flex;gap:0;min-height:calc(100vh - 54px)">
+    <div id="owner-side" style="width:230px;flex-shrink:0;border-right:1.5px solid var(--border);padding:10px;overflow-y:auto"></div>
+    <div id="owner-main" style="flex:1;padding:14px 18px;overflow:auto;min-width:0"></div>
   </div>
 </div>
 <!-- XLSX -->
@@ -1501,6 +1533,9 @@ function buildSnapshot() {
     cdDeleted: cdDeleted,
     cdDismissed: (function(){ try{ return JSON.parse(localStorage.getItem('mg_cd_dismissed')||'[]'); }catch(e){ return []; } })(),
     tombstones: _getTombstones(),   // deleted ids — so deletions propagate across devices
+    ownerMeta: _ownerMeta(),
+    ownerPay:  (function(){ try{ return JSON.parse(localStorage.getItem('mg_owner_pay')||'[]'); }catch(e){ return []; } })(),
+    ownerOpen: (function(){ try{ return JSON.parse(localStorage.getItem('mg_owner_open')||'{}'); }catch(e){ return {}; } })(),
     cdLiveStart:   localStorage.getItem('mg_cd_live_start') || null,         // shared C/D start day
     cdLiveStartAt: parseInt(localStorage.getItem('mg_cd_live_start_at')||'0'),
     savedAt:   new Date().toISOString()
@@ -1563,6 +1598,10 @@ function _reconcileLiveToTodayChart(charts){
     var tc = charts.find(function(c){ return c && _chartDay(c)===tk && Array.isArray(c.entries); });
     if(!tc) return;
     if(JSON.stringify(tc.entries) === JSON.stringify(entries)) return;   // already in sync
+    try {
+      var _dd = _diffIds(_rowSigMap(entries), tc.entries);
+      if(_dd.ids.length) _intentLog('sync', 'sync_reconcile', _dd.ids);
+    } catch(e){}
     entries = JSON.parse(JSON.stringify(tc.entries));
     safeSetItem(ENTRIES_KEY, JSON.stringify(entries));
     if(typeof _setCurrentChart === 'function') _setCurrentChart(tc.id, tc.name || _dayToName(tk));
@@ -1597,6 +1636,41 @@ function _mergeChartLists(localList, driveList){
   merged.sort(function(a,b){ return _chartDay(b) < _chartDay(a) ? -1 : _chartDay(b) > _chartDay(a) ? 1 : 0; });
   if(merged.length > 365) merged = merged.slice(0,365);
   return merged;
+}
+
+// ═══ BOOT SELF-CHECK — production version of the test suite's invariants. Runs after the boot
+// cleanups. Fixable issues are fixed (and receipted); history corruption is surfaced loudly. ═══
+function _bootIntegrityV1(){
+  try {
+    var problems=[], fixed=[];
+    // 1) live: duplicate / missing _id (monitor also fixes; verify here)
+    var seen={}, dup=0, miss=0;
+    (entries||[]).forEach(function(e){ if(!e) return; if(!e._id) miss++; else { if(seen[e._id]) dup++; seen[e._id]=1; } });
+    if(dup||miss) problems.push('live行id异常 dup='+dup+' miss='+miss);
+    // 2) live ≡ today chart (after boot cleanups live is the truth → re-persist to heal)
+    try {
+      var tc=(JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]')||[]).find(function(c){ return c && _chartDay(c)===_dayKey(); });
+      if(tc && JSON.stringify(tc.entries||[]) !== JSON.stringify(entries||[])){
+        if(typeof _logOp==='function') _logOp('system','boot_check·今日表与live不一致，已按live重存');
+        _persistCurrentChart(); fixed.push('今日表已对齐');
+      }
+    } catch(e){}
+    // 3) history checksum verification (only where stamped)
+    try {
+      var bad=[];
+      (JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]')||[]).forEach(function(c){
+        if(!c || !c.chk || _chartDay(c)===_dayKey()) return;
+        var k=_chartChk(c.entries);
+        if(k.n!==c.chk.n || k.s!==c.chk.s) bad.push(c.name||_chartDay(c));
+      });
+      if(bad.length){
+        problems.push('历史表校验和不符: '+bad.join(', '));
+        try { alert('⚠️ 数据体检发现历史表可能损坏：\n'+bad.join('\n')+'\n\n请到「历史」核对该日数据（可从备份/Excel恢复）。'); } catch(e){}
+      }
+    } catch(e){}
+    if(problems.length && typeof _logOp==='function') _logOp('system','boot_check·发现:'+problems.join(';'));
+    if(fixed.length && typeof _showSuccessToast==='function') _showSuccessToast('开机体检：'+fixed.join('、'));
+  } catch(e){ console.warn('_bootIntegrityV1 failed:', e); }
 }
 
 // One-time shrink of EXISTING storage bloat (old caps left snapshots/backups/oplog huge, which
@@ -1693,9 +1767,33 @@ function applySnapshot(data, applyEntries) {
   if(applyEntries === undefined) applyEntries = false;  // SAFE default — never overwrite by accident
   var changed = false;
 
-  if (Array.isArray(data.owners) && JSON.stringify(data.owners) !== JSON.stringify(OWNERS_LIST)) {
-    OWNERS_LIST = data.owners;
-    localStorage.setItem('mg_owners', JSON.stringify(OWNERS_LIST));
+  // Owners — MERGE, never wholesale-replace. The old replace meant: add an owner locally →
+  // the next periodic pull delivers a snapshot without it → your new owner silently vanishes.
+  // Rule: union of both lists; per-name add/remove timestamps (ownerMeta) decide visibility
+  // (the LATER action wins), so removals still propagate and re-adds beat old removals.
+  if (Array.isArray(data.owners)) {
+    try {
+      var lm = _ownerMeta();
+      if (data.ownerMeta && typeof data.ownerMeta === 'object') {
+        Object.keys(data.ownerMeta).forEach(function(nm){
+          var inc = data.ownerMeta[nm] || {};
+          var cur = lm[nm] || {};
+          lm[nm] = { a: Math.max(cur.a||0, inc.a||0), r: Math.max(cur.r||0, inc.r||0) };
+        });
+        localStorage.setItem('mg_owner_meta', JSON.stringify(lm));
+      }
+      function visible(nm){ var m=lm[nm]; if(!m) return true; return (m.a||0) >= (m.r||0); }
+      var merged = [];
+      OWNERS_LIST.forEach(function(o){ if(o && visible(o) && merged.indexOf(o)<0) merged.push(o); });
+      data.owners.forEach(function(o){ if(o && visible(o) && merged.indexOf(o)<0){
+        var oi = merged.indexOf('其他');
+        if(oi >= 0) merged.splice(oi, 0, o); else merged.push(o);
+      }});
+      if(JSON.stringify(merged) !== JSON.stringify(OWNERS_LIST)){
+        OWNERS_LIST = merged;
+        localStorage.setItem('mg_owners', JSON.stringify(OWNERS_LIST));
+      }
+    } catch(e){}
   }
   // NOTE: live `entries` are no longer replaced from Drive here. They are reconciled to the
   // UNION-merged today chart AFTER the chart merge below (see _reconcileLiveToTodayChart) —
@@ -1720,6 +1818,31 @@ function applySnapshot(data, applyEntries) {
       changed = true;
     }
     // If Drive's rates are from a previous day, IGNORE them — local clearing is correct
+  }
+  // Owner ledger — payments union by _id (newer updatedAt wins, incl. soft-delete);
+  // opening balances per-owner newer wins.
+  if (Array.isArray(data.ownerPay)) {
+    try {
+      var lp = JSON.parse(localStorage.getItem('mg_owner_pay')||'[]')||[];
+      var byId = {}; lp.forEach(function(r){ if(r&&r._id) byId[r._id]=r; });
+      data.ownerPay.forEach(function(r){
+        if(!r || !r._id) return;
+        var cur = byId[r._id];
+        if(!cur || (r.updatedAt||0) > (cur.updatedAt||0)) byId[r._id] = r;
+      });
+      localStorage.setItem('mg_owner_pay', JSON.stringify(Object.keys(byId).map(function(k){ return byId[k]; })));
+    } catch(e){}
+  }
+  if (data.ownerOpen && typeof data.ownerOpen === 'object') {
+    try {
+      var lo = JSON.parse(localStorage.getItem('mg_owner_open')||'{}')||{};
+      Object.keys(data.ownerOpen).forEach(function(o){
+        var r = data.ownerOpen[o];
+        if(!r) return;
+        if(!lo[o] || (r.updatedAt||0) > (lo[o].updatedAt||0)) lo[o] = r;
+      });
+      localStorage.setItem('mg_owner_open', JSON.stringify(lo));
+    } catch(e){}
   }
   // Shared C/D start day — adopt the most RECENT deliberate decision across devices, so all
   // devices carry from the same day (auto-set values carry timestamp 0 and never override).
@@ -2590,6 +2713,12 @@ const RP_BANKS     = ['BCA','BRI','MD','OCBC_SG'];
 const THB_BANKS    = ['KS Bank','TFB','SCOM','Bangkok Bank','SCB','BBL'];
 const DEFAULT_OWNERS = ['良','HOE','平','强发','金元','联发','利丰','福发','陈仔','标记','NOK','其他'];
 var OWNERS_LIST = JSON.parse(localStorage.getItem('mg_owners') || 'null') || [...DEFAULT_OWNERS];
+// Per-owner add/remove timestamps — the sync arbiter (later action wins across devices).
+function _ownerMeta(){ try{ return JSON.parse(localStorage.getItem('mg_owner_meta')||'{}')||{}; }catch(e){ return {}; } }
+function _ownerMetaMark(name, field){
+  try { var m=_ownerMeta(); var r=m[name]||{}; r[field]=Date.now(); m[name]=r;
+    localStorage.setItem('mg_owner_meta', JSON.stringify(m)); } catch(e){}
+}
 const DEFAULT_BANKS = ['MBB','PBB','AMB','HLB','RHB','OCBC (MY)','OCBC (SG/IDR)','CIMB','UOB','HSBC','BCA','BRI','KS Bank','TFB','BBL','SCB','MD','其他'];
 var ALL_BANKS_OPTS = JSON.parse(localStorage.getItem('mg_banks')||'null') || [...DEFAULT_BANKS];
 
@@ -2903,6 +3032,10 @@ function pushUndo(){
 // markUnsaved() defined below in auto-save section
 function undoEntry(){
   if(!undoStack.length) return;
+  // Undo rewrites history in BOTH directions: it may restore a just-deleted row (R10 must not
+  // re-delete it) or remove a just-added one (R9 must not "recover" it). Clear both markers.
+  try { localStorage.removeItem('mg_lastdel'); } catch(e){}
+  try { localStorage.removeItem('mg_lastadd'); } catch(e){}
   // Clear alloc focus state BEFORE renderAll destroys DOM (prevents stale blur snapshot)
   _allocFocusSnap = null;
   _allocFocusKey  = null;
@@ -2913,6 +3046,7 @@ function undoEntry(){
 }
 function redoEntry(){
   if(!redoStack.length) return;
+  try { localStorage.removeItem('mg_lastdel'); localStorage.removeItem('mg_lastadd'); } catch(e){}
   _allocFocusSnap = null;
   _allocFocusKey  = null;
   undoStack.push(_snapshotState());
@@ -2950,6 +3084,12 @@ function updateUndoBtns(){
 // `entries` belongs to (currentChartId/Name) on EVERY save, so mg_charts and
 // mg_entries never diverge. This is what makes data loss impossible — a reload/sync
 // always finds the same data in the bound chart. Lightweight (no per-call snapshot).
+// Chart checksum {n:rows, s:Σamount(分)} — stamped on every persist, verified at boot. Catches
+// silent corruption (a truncated write, a bad merge) the moment it happens, not days later.
+function _chartChk(list){
+  var sum=0; (list||[]).forEach(function(e){ if(e) sum += Math.round(((e.rmAmount!=null?e.rmAmount:e.amount)||0)*100); });
+  return { n:(list||[]).length, s:sum };
+}
 function _persistCurrentChart(){
   try {
     var name = currentChartName || _todayDateStr();
@@ -2962,6 +3102,7 @@ function _persistCurrentChart(){
     var rsnap = {sgd:rates.sgd, thb:rates.thb, idr:rates.idr, sgdThb:rates.sgdThb, sgdIdr:rates.sgdIdr};
     if(idx >= 0){
       charts[idx].entries = JSON.parse(JSON.stringify(entries));
+      charts[idx].chk = _chartChk(entries);
       charts[idx].date = new Date().toISOString();   // editedAt ONLY — day logic must use c.day
       if(!charts[idx].day) charts[idx].day = _chartDay(charts[idx]);   // stamp legacy charts
       // Only update rates when we actually have some (never wipe good rates with empty).
@@ -2969,7 +3110,7 @@ function _persistCurrentChart(){
       if(currentChartId==null) _setCurrentChart(charts[idx].id, charts[idx].name);
     } else {
       var nc = { id:(currentChartId!=null?currentChartId:Date.now()), day:day, name:_dayToName(day), date:new Date().toISOString(),
-                 entries:JSON.parse(JSON.stringify(entries)), rates:rsnap };
+                 entries:JSON.parse(JSON.stringify(entries)), chk:_chartChk(entries), rates:rsnap };
       charts.unshift(nc);
       // Cap: drop the OLDEST business day, not the last array slot (array order isn't guaranteed).
       if(charts.length>365){ var oi=0, ok='9999'; charts.forEach(function(c,i){ var d=_chartDay(c); if(d<ok){ok=d;oi=i;} }); charts.splice(oi,1); }
@@ -3015,11 +3156,51 @@ function _bumpAction(){
 function MGReloadEntries(){
   try {
     entries = JSON.parse(localStorage.getItem(ENTRIES_KEY)||'[]');
+    // Keep the today CHART in step with the repaired live set — otherwise live≠chart until the
+    // next manual save, and the boot check / reconcile would see a false divergence.
+    if(typeof _persistCurrentChart === 'function') _persistCurrentChart();
     if(typeof renderAll === 'function') renderAll();
   } catch(e){ console.warn('MGReloadEntries failed:', e); }
 }
 
+// ═══ INTENT LEDGER — the receipts that make "human vs system" a matter of EVIDENCE. ═══
+// Every legitimate write leaves an intent {ts, dev, src, op, ids}. The watchdog then works like
+// an auditor: a state change whose row ids have no covering intent is a system error BY
+// DEFINITION and gets surgically reverted (only those rows). No more time-window guessing.
+var INTENTS_KEY = 'mg_intents';
+var _deviceTag = (function(){ try{ return /Mobi|Android|iPad|Tablet/i.test(navigator.userAgent)?'平板':'电脑'; }catch(e){ return '?'; } })();
+function _intentLog(src, op, ids, detail){
+  try{
+    var a = JSON.parse(localStorage.getItem(INTENTS_KEY)||'[]');
+    a.unshift({ ts:Date.now(), dev:_deviceTag, src:src, op:String(op||'').slice(0,60), ids:(ids||[]).slice(0,120), d:String(detail||'').slice(0,80) });
+    if(a.length > 400) a = a.slice(0,400);
+    localStorage.setItem(INTENTS_KEY, JSON.stringify(a));
+  }catch(e){}
+}
+function _intentsSince(t){ try{ return (JSON.parse(localStorage.getItem(INTENTS_KEY)||'[]')||[]).filter(function(i){ return i && i.ts >= t; }); }catch(e){ return []; } }
+// Row signature — which fields count as "the row changed" for attribution purposes.
+function _rowSig(e){ return JSON.stringify([e.amount,e.rmAmount,e.act,e.yes,e.hs,e.cash,e.btHeng,e.hidden,e.owner,e.name,e.isCD]); }
+function _rowSigMap(list){ var m={}; (list||[]).forEach(function(e){ if(e&&e._id) m[e._id]=_rowSig(e); }); return m; }
+var _pendingOpLabel = null;     // set by _logOp; consumed by the next saveEntries as the op name
+function _diffIds(prev, curList){
+  var cur=_rowSigMap(curList), ids=[], seen={};
+  Object.keys(cur).forEach(function(id){ if(!(id in prev)) ids.push(id); else if(prev[id]!==cur[id]) ids.push(id); seen[id]=1; });
+  Object.keys(prev).forEach(function(id){ if(!seen[id]) ids.push(id); });
+  return {ids:ids, map:cur};
+}
 function saveEntries(skipSnapshot){
+  // Attribution: diff against the LAST persisted state → every changed/added/removed row gets a
+  // receipt automatically. Any code path that persists via saveEntries is covered — no per-path
+  // wiring to forget (forgetting was the root of every past false "ghost" kill).
+  try {
+    var _prevStored = _rowSigMap(JSON.parse(localStorage.getItem(ENTRIES_KEY)||'[]'));
+    var _d = _diffIds(_prevStored, entries);
+    if(_d.ids.length){
+      var lbl = (_pendingOpLabel && (Date.now()-_pendingOpLabel.t) < 3000) ? _pendingOpLabel.op : 'save';
+      _intentLog('user', lbl, _d.ids);
+    }
+    _pendingOpLabel = null;
+  } catch(e){}
   // Entries auto-pushed to Drive (debounced) so work isn't lost on disconnect/relogin
   var ok = safeSetItem(ENTRIES_KEY, JSON.stringify(entries));
   localStorage.setItem('mg_last_write', Date.now().toString());
@@ -3053,6 +3234,7 @@ function _compactEntry(e){
 // type: short code; msg: human text; opts.snap = entries array BEFORE the op (for restore).
 function _logOp(type, msg, opts){
   opts = opts || {};
+  try { _pendingOpLabel = { op: type+(msg?('·'+String(msg).slice(0,30)):''), t: Date.now() }; } catch(e){}
   try {
     var log = JSON.parse(localStorage.getItem(OPLOG_KEY)||'[]');
     var rec = { ts: Date.now(), dev: (typeof _deviceId!=='undefined'?_deviceId:''), type: type||'op', msg: msg||'' };
@@ -3197,6 +3379,10 @@ function saveRatesSGD(){
 
   safeSetItem(RATES_KEY, JSON.stringify(rates));
   localStorage.setItem('mg_rates_date', _dayKey());   // LOCAL day, consistent with the clear check
+  // HUMAN marker for the watchdog: rate typing fires per keystroke, so a lightweight timestamp
+  // (not an op-log entry per key). Without this the ghost-rate rule reverted the user's FIRST
+  // manual rate input as "rates changed with no explanation".
+  try { localStorage.setItem('mg_rates_edit_at', String(Date.now())); } catch(e){}
   _saveRatesToTodayChart();   // bind the day's rate to today's chart (survives daily clear)
   _pushToDrive();
   updateRatesTodayLabel();
@@ -3605,6 +3791,7 @@ function renderAll(){
         <td><div class="row-btns">
           ${_qaButtonsHTML(gi, group, false)}
           <button class="hide-btn" onclick="toggleHideEntry('${gi}')" title="${entry.hidden?'取消隐藏':'隐藏记录'}" style="${entry.hidden?'color:var(--accent)':''}">${entry.hidden?'🙈':'👁'}</button>
+          ${(typeof _rowAuditVisible==='function'&&_rowAuditVisible())?`<button class="hide-btn" onclick="showRowAudit('${gi}')" title="操作履历(谁·哪台·何时·做了什么)">📜</button>`:''}
           <button class="edit-btn" onclick="openEditModal('${gi}')" title="Edit">✏️</button>
           <button class="del-btn" onclick="deleteEntry('${gi}')" title="Delete">×</button>
         </div></td>`;
@@ -4847,6 +5034,8 @@ function finalConfirm(){
       // isCD, but KEEP cdSource with a cdMerged marker — the carried-into-today set reads
       // cdSource to know the source is already represented today; deleting it made auto-carry
       // bring the old balance in AGAIN (the "one pre-merge + one post-merge row" bug).
+      // Remember the CARRIED portion so the owner ledger counts only the NEW deal part.
+      entries[gi].cdCarryPart = (ex.isCD && !ex.cdMerged) ? (ex.amount||0) : (ex.cdCarryPart||0);
       entries[gi].isCD = false;
       entries[gi].cdMerged = true;
       if(entries[gi].name) entries[gi].name = entries[gi].name.replace(/\s*\[C\/D fr [^\]]+\]/g,'').trim();
@@ -5285,12 +5474,14 @@ function _cdSettledIds(){
   return set;
 }
 
-// Refs already carried into TODAY (so re-running never double-carries). Scans ONLY today —
-// live entries + today's chart — NOT history. A past-day record is therefore never wrongly
-// hidden just because some OTHER day's entry references it.
+// Refs already carried into TODAY (so re-running never double-carries). Scans ONLY today.
+// MATCHING IS ID-FIRST: source _ids are stable across devices (charts sync by _id), so an exact
+// id match is the ONLY safe dedupe. The old customer+amount ("sk") net silently swallowed TWIN
+// deals — a customer with TWO same-amount unsettled deals had the second one never carried.
+// sig remains ONLY as a fallback for legacy id-less rows.
 function _cdCarriedIntoTodaySet(){
-  var set = {};
-  function scan(list){ (list||[]).forEach(function(e){ if(e && e.cdSource){ if(e.cdSource.id) set['id:'+e.cdSource.id]=1; if(e.cdSource.sig) set['sig:'+e.cdSource.sig]=1; if(e.cdSource.srcKey) set['sk:'+e.cdSource.srcKey]=1; } }); }
+  var set = { ids:{}, sigs:{} };
+  function scan(list){ (list||[]).forEach(function(e){ if(e && e.cdSource){ if(e.cdSource.id) set.ids[e.cdSource.id]=1; else if(e.cdSource.sig) set.sigs[e.cdSource.sig]=1; } }); }
   try { scan(entries); } catch(_){}
   try { var tk=_dayKey(); _cdCanonicalCharts().forEach(function(c){ if(c && _chartDay(c)===tk) scan(c.entries); }); } catch(_){}
   return set;
@@ -5343,9 +5534,9 @@ function _cdBuildItems(filterChartId){
       if(!e || e.cdHidden) return;
       var idRef  = _cdSrcRef(e);             // 'id:..' or 'sig:..'
       var sigRef = 'sig:' + _cdSig(e);
-      var skRef = 'sk:'+_cdCustAmtKey(e);                       // customer+amount (day-agnostic)
-      var dayRef = skRef+'@'+_chartDay(c);                      // ...scoped to THIS source day
-      if(carried[idRef] || carried[sigRef] || carried[skRef]) return;   // already carried into today (any device, by customer+amount)
+      var dayRef = 'sk:'+_cdCustAmtKey(e)+'@'+_chartDay(c);     // dismissal scope: customer+amount@day
+      // ID-FIRST carried check — twin same-amount deals are DIFFERENT ids and must both carry.
+      if(e._id ? carried.ids[e._id] : carried.sigs[_cdSig(e)]) return;
       if(dismissed[idRef] || dismissed[sigRef] || dismissed[dayRef]) return; // user removed it (on ANY device)
       var info = _cdComputeUnalloc(e);
       if(!info) return;                                  // settled → skip
@@ -5535,13 +5726,22 @@ function deleteCDGroup(){
 
 // Import selected CD items into today's entries
 function confirmCD(){
+  // DOUBLE-TAP GUARD: a slow tablet double-tap fired this twice and imported every row TWICE.
+  // Two layers: a short re-entrancy lock, and re-filtering against the FRESH carried-set so a
+  // second call (or a stale modal) can never import a source that is already in today.
+  if(window.__cdImportLock && (Date.now()-window.__cdImportLock)<800) return;
+  window.__cdImportLock = Date.now();
   var checked = Array.from(document.querySelectorAll('#cd-list input[type=checkbox]:checked'));
   if(!checked.length){ closeModal('modal-cd'); return; }
 
+  var _car = _cdCarriedIntoTodaySet();
   var selectedItems = checked.map(function(cb){
     var idx = parseInt(cb.id.replace('cdi-',''));
     return _cdItems[idx];
-  }).filter(Boolean);
+  }).filter(Boolean).filter(function(it){
+    var src=it&&it.entry; if(!src) return false;
+    return !(src._id ? _car.ids[src._id] : _car.sigs[_cdSig(src)]);   // already in today → skip
+  });
 
   if(!selectedItems.length){ closeModal('modal-cd'); return; }
 
@@ -5606,6 +5806,7 @@ function confirmCD(){
   // Add + persist + VERIFY. If the save fails (quota), roll back fully so nothing is half-done:
   // the source items stay in C/D (not consumed) and no data is lost.
   added.forEach(function(ne){ entries.push(ne); });
+  try { _intentLog('user','cd_import·手动带入', added.map(function(e){return e._id;})); } catch(e){}
   var ok = safeSetItem(ENTRIES_KEY, JSON.stringify(entries));
   if(ok === false){
     entries = entries.filter(function(e){ return added.indexOf(e) === -1; });
@@ -5842,7 +6043,9 @@ function _cdEnforceFreshCarries(){
     var groups = {};
     entries.forEach(function(e){
       if(!e || !e.isCD || e.cdManual) return;
-      var key = (e.cdSource && e.cdSource.srcKey) ? (e.cdSource.srcKey+'@'+(e.cdSource.srcDay||'')) : (_cdCustAmtKey(e)+'@'+_cdRowSrcDay(e));
+      var key = (e.cdSource && e.cdSource.id) ? ('sid:'+e.cdSource.id)
+              : (e.cdSource && e.cdSource.srcKey) ? (e.cdSource.srcKey+'@'+(e.cdSource.srcDay||''))
+              : (_cdCustAmtKey(e)+'@'+_cdRowSrcDay(e));
       (groups[key]=groups[key]||[]).push(e);
     });
     Object.keys(groups).forEach(function(k){
@@ -6634,6 +6837,8 @@ function addOwner(){
   if(otherIdx >= 0){ OWNERS_LIST.splice(otherIdx, 0, name); }
   else { OWNERS_LIST.push(name); }
   localStorage.setItem('mg_owners', JSON.stringify(OWNERS_LIST));
+  _ownerMetaMark(name, 'a');   // add-timestamp: survives merges, beats older removals
+  if(typeof _logOp==='function') _logOp('edit','添加 Owner：'+name);
   _pushToDrive();
   if(inp) inp.value = '';
   renderOwnerList();
@@ -6644,6 +6849,8 @@ function removeOwner(idx){
   if(!confirm((isEng?'Remove owner: ':'删除 Owner：') + name + '?')) return;
   OWNERS_LIST.splice(idx, 1);
   localStorage.setItem('mg_owners', JSON.stringify(OWNERS_LIST));
+  _ownerMetaMark(name, 'r');   // remove-timestamp: propagates the deletion to other devices
+  if(typeof _logOp==='function') _logOp('edit','删除 Owner：'+name);
   _pushToDrive();
   renderOwnerList();
 }
@@ -7315,7 +7522,7 @@ function exportPDF(printMode){
   const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260714130405 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260720002649 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
@@ -7925,6 +8132,9 @@ function _setupAggressiveTokenRefresh(){
 function checkLoginRequiredOverlay(){
   var ov = document.getElementById('login-required-overlay');
   if(!ov) return;
+  // LOCAL TESTING bypass: on localhost there is no production data to protect and no Drive to
+  // sync — never block entry. (The live site's hostname is github.io, so this never fires there.)
+  if(location.hostname==='localhost' || location.hostname==='127.0.0.1'){ ov.classList.remove('show'); return; }
   var loggedIn = _syncEnabled && _gdriveToken &&
                  (parseInt(localStorage.getItem('mg_gdrive_expiry')||'0') > Date.now());
   if(!loggedIn){
@@ -9892,6 +10102,362 @@ function batchExportExcel(){
   try { exportExcel(); } finally { entries = orig; }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// OWNER 账本 — 每位负责人(owner)的档案:名下交易(自动跟随每日表格) + 来银/付款 + 期初,
+// 统一以 SGD 记账(按"那一天表格里存的汇率"换算),余额 = 期初 + 交易 − 来银 + 付款(欠我型)。
+// 交易线是动态推导(不落盘):改表、补汇率,账本自动跟着变,零重复录入、零脱节。
+// ═══════════════════════════════════════════════════════════════════════════
+var OWNER_LEDGER_START = '2026-07-20';   // 干净起点(用户指定 20/7):该日起交易自动入账,之前一律不计
+var OWNER_PAY_KEY  = 'mg_owner_pay';
+var OWNER_OPEN_KEY = 'mg_owner_open';
+function _ownerPays(){ try{ return JSON.parse(localStorage.getItem(OWNER_PAY_KEY)||'[]')||[]; }catch(e){ return []; } }
+function _ownerOpens(){ try{ return JSON.parse(localStorage.getItem(OWNER_OPEN_KEY)||'{}')||{}; }catch(e){ return {}; } }
+// 单行的账本值:币种 = 客户实际付款的币种。
+//   • 触发过换算(conv 且与当前金额自洽)或原始输入就是新币 → 记 SGD(alt=换算后的原币,可切换看)
+//   • 其余(RM/THB/IDR 原币录入) → 记原币(alt=按当日汇率折的 SGD,仅供切换参考,可能缺)
+// amtOverride 用于合并行只计新货(合并行不再信 conv)。
+function _ownerRowVal(e, cr, amtOverride){
+  cr = cr || {};
+  var useOv = (amtOverride !== undefined && amtOverride !== null);
+  function convOK(target, nat, tol){ return !useOv && e.conv && e.conv.sgd && e.conv.target===target && e.conv.mult>0 && Math.abs(e.conv.sgd*e.conv.mult - nat) <= tol; }
+  if(e.sgdPending || e.currency === 'SGD'){
+    var v = useOv ? amtOverride : (e.amount || e.sgdAmount || 0);
+    return { cur:'SGD', amt:v, alt:null };
+  }
+  if(e.group === 'RP'){
+    var nat = useOv ? amtOverride : (e.amount || 0);
+    if(convOK('IDR', nat, 1)) return { cur:'SGD', amt:e.conv.sgd, alt:{cur:'IDR', amt:nat} };
+    return { cur:'IDR', amt:nat, alt:(cr.sgdIdr>0 ? {cur:'SGD', amt:nat/cr.sgdIdr} : null) };
+  }
+  if(e.group === 'THB'){
+    var natT = useOv ? amtOverride : (e.amount || 0);
+    if(convOK('THB', natT, 0.05)) return { cur:'SGD', amt:e.conv.sgd, alt:{cur:'THB', amt:natT} };
+    return { cur:'THB', amt:natT, alt:(cr.sgdThb>0 ? {cur:'SGD', amt:natT/cr.sgdThb} : null) };
+  }
+  var natR = useOv ? amtOverride : (e.rmAmount || 0);
+  if(convOK('RM', natR, 0.05)) return { cur:'SGD', amt:e.conv.sgd, alt:{cur:'RM', amt:natR} };
+  return { cur:'RM', amt:natR, alt:(cr.sgd>0 ? {cur:'SGD', amt:natR/cr.sgd} : null) };
+}
+// 全部 owner 的交易线(day>=起始日;排除 isCD 带入副本;合并行只计新货部分)
+function _ownerDealLines(){
+  var map = {};
+  var charts; try{ charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]')||[]; }catch(e){ charts=[]; }
+  var seenRow = {};   // day+_id → 已计(防御:同日重复表短暂共存时不双计)
+  charts.forEach(function(c){
+    if(!c || !Array.isArray(c.entries)) return;
+    var day = _chartDay(c);
+    if(!day || day < OWNER_LEDGER_START) return;
+    var cr = c.rates || {};
+    c.entries.forEach(function(e){
+      if(!e || !e.owner) return;
+      if(e._id){ var rk=day+'|'+e._id; if(seenRow[rk]) return; seenRow[rk]=1; }
+      if(e.isCD) return;                                     // 带入副本 = 前一日余额,原始交易已计
+      var ov;
+      if(e.cdMerged){                                        // 合并行:金额 = 带入余额 + 新货 → 只计新货
+        var base = (e.group==='RP'||e.group==='THB') ? (e.amount||0) : (e.rmAmount||0);
+        ov = base - (e.cdCarryPart || 0);
+        if(Math.abs(ov) < 0.005) return;
+      }
+      var r = _ownerRowVal(e, cr, ov);
+      if(!r.amt) return;
+      var o = String(e.owner).trim();
+      if(!o) return;
+      (map[o] = map[o] || []).push({ kind:'deal', day:day, name:(e.name||'').replace(/\s*\[C\/D fr [^\]]+\]/g,''), cur:r.cur, amt:r.amt, alt:r.alt, id:e._id });
+    });
+  });
+  return map;
+}
+// 一位 owner 的完整账目(交易 + 来银/付款),按日期升序(供滚动余额)
+function _ownerLedger(owner){
+  var lines = (_ownerDealLines()[owner] || []).slice();
+  _ownerPays().forEach(function(pRec){
+    if(!pRec || pRec.del || pRec.owner !== owner) return;
+    lines.push({ kind:pRec.type==='in'?'pay_in':'pay_out', day:pRec.day, name:pRec.note||'',
+                 cur:(pRec.cur||'SGD'), amt:(pRec.amt!=null?pRec.amt:pRec.sgd)||0, alt:null, id:pRec._id });
+  });
+  lines.sort(function(a,b){ return a.day<b.day?-1:a.day>b.day?1:0; });
+  // 余额按币种分桶:每个币种独立 期初+交易−来银+付款
+  var openRec = _ownerOpens()[owner]||{};
+  var open = openRec.bal || (openRec.sgd!=null ? {SGD:openRec.sgd} : {});
+  var buckets = {}; Object.keys(open).forEach(function(cu){ if(open[cu]) buckets[cu]=open[cu]; });
+  lines.forEach(function(l){
+    var cu=l.cur||'SGD';
+    if(!(cu in buckets)) buckets[cu]=0;
+    if(l.kind==='deal') buckets[cu]+=l.amt;
+    else if(l.kind==='pay_in') buckets[cu]-=l.amt;
+    else buckets[cu]+=l.amt;                                 // 付款(我付给他) → 该币种欠我更多
+    l.run = buckets[cu]; l.runCur = cu;                      // 滚动余额 = 本币种桶
+  });
+  return { open:open, lines:lines, buckets:buckets };
+}
+function _ownerNames(){
+  var set = {};
+  try { (OWNERS_LIST||[]).forEach(function(o){ if(o) set[o]=1; }); } catch(e){}
+  var dl = _ownerDealLines(); Object.keys(dl).forEach(function(o){ set[o]=1; });
+  _ownerPays().forEach(function(pr){ if(pr && !pr.del && pr.owner) set[pr.owner]=1; });
+  Object.keys(_ownerOpens()).forEach(function(o){ set[o]=1; });
+  return Object.keys(set).sort();
+}
+function _ownerAddPay(owner, type, amt, cur, day, note){
+  var recs = _ownerPays();
+  var rec = { _id:_genId(), owner:owner, type:type, amt:amt, cur:cur||'SGD', day:day||_dayKey(), note:note||'', updatedAt:Date.now() };
+  recs.push(rec);
+  safeSetItem(OWNER_PAY_KEY, JSON.stringify(recs));
+  if(typeof _logOp==='function') _logOp('owner_pay', (type==='in'?'来银':'付款')+'：'+owner+' '+(cur||'SGD')+' '+amt+(note?('（'+note+'）'):''));
+  if(typeof _pushToDrive==='function') _pushToDrive();
+  return rec._id;
+}
+function _ownerDelPay(id){
+  var recs = _ownerPays(), hit=null;
+  recs.forEach(function(r){ if(r && r._id===id){ r.del = true; r.updatedAt = Date.now(); hit=r; } });
+  if(!hit) return;
+  safeSetItem(OWNER_PAY_KEY, JSON.stringify(recs));
+  if(typeof _logOp==='function') _logOp('owner_pay', '删除'+(hit.type==='in'?'来银':'付款')+'：'+hit.owner+' '+(hit.cur||'SGD')+' '+((hit.amt!=null?hit.amt:hit.sgd)||0));
+  if(typeof _pushToDrive==='function') _pushToDrive();
+}
+function _ownerSetOpen(owner, cur, amt){
+  var m = _ownerOpens();
+  var rec = m[owner] || {};
+  var bal = rec.bal || (rec.sgd!=null ? {SGD:rec.sgd} : {});
+  bal[cur||'SGD'] = amt;
+  m[owner] = { bal:bal, updatedAt:Date.now() };
+  safeSetItem(OWNER_OPEN_KEY, JSON.stringify(m));
+  if(typeof _logOp==='function') _logOp('owner_pay', '期初余额：'+owner+' '+(cur||'SGD')+' '+amt);
+  if(typeof _pushToDrive==='function') _pushToDrive();
+}
+
+// ── Owner UI(独立全屏界面;快速录入,无逐步弹窗)──────────────────────────
+var _ownerShowAlt = false;    // 💱 切换:显示换算参考值(SGD行→原币 / 原币行→SGD)
+var _ownerSel = null;         // 当前选中的 owner
+var _ownerPayType = 'in';     // 快速录入条:来银/付款
+var _ownerPayCur = 'RM';      // 快速录入条:币种(默认RM;SGD仅在明确选择时)
+function _fmtCur(cur, amt){
+  if(cur==='IDR') return 'IDR '+Math.round(amt).toLocaleString();
+  return cur+' '+fmtN(Math.round(amt*100)/100);
+}
+function _fmtBuckets(b, sep){
+  var ks = Object.keys(b).filter(function(k){ return Math.abs(b[k])>=0.005; });
+  if(!ks.length) return '<span style="color:var(--green)">✓ 清</span>';
+  var ord = {SGD:0, RM:1, THB:2, IDR:3};
+  ks.sort(function(a,x){ return (ord[a]||9)-(ord[x]||9); });
+  return ks.map(function(k){ var col = b[k]>0?'var(--red)':'var(--accent)'; return '<span style="color:'+col+';font-family:monospace;font-weight:800">'+_fmtCur(k,b[k])+'</span>'; }).join(sep||' · ');
+}
+function openOwnerPanel(){ if(!_ownerSel){ var ns=_ownerNames(); _ownerSel = ns.length?ns[0]:null; } renderOwnerScreen(); document.getElementById('owner-screen').style.display='block'; }
+function openOwnerDetail(owner){ _ownerSel = owner; renderOwnerScreen(); document.getElementById('owner-screen').style.display='block'; }
+function closeOwnerScreen(){ document.getElementById('owner-screen').style.display='none'; }
+function renderOwnerScreen(){
+  var side=document.getElementById('owner-side'), main=document.getElementById('owner-main');
+  if(!side || !main) return;
+  var names=_ownerNames();
+  side.innerHTML = names.map(function(o){
+    var led=_ownerLedger(o);
+    var safe=o.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+    var sel = (o===_ownerSel);
+    return '<div onclick="openOwnerDetail(\''+safe+'\')" style="padding:9px 10px;border-radius:8px;cursor:pointer;margin-bottom:4px;'+(sel?'background:var(--surface2);border:1.5px solid var(--border2)':'border:1.5px solid transparent')+'">'+
+      '<div style="font-weight:700;font-size:13px">'+o+'</div>'+
+      '<div style="font-size:11px;margin-top:2px">'+_fmtBuckets(led.buckets,'<br>')+'</div></div>';
+  }).join('') || '<div style="color:var(--text3);padding:10px;font-size:12px">暂无 owner</div>';
+  if(!_ownerSel){ main.innerHTML='<div style="color:var(--text3);padding:24px">左侧选择一位 owner</div>'; return; }
+  var owner=_ownerSel, led=_ownerLedger(owner);
+  var safe=owner.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
+  var openStr = Object.keys(led.open).filter(function(k){return led.open[k];}).map(function(k){return _fmtCur(k,led.open[k]);}).join(' · ') || '0';
+  var CH='padding:5px 10px;border-radius:7px;border:1.5px solid var(--border2);cursor:pointer;font-size:12px;user-select:none';
+  var html =
+    '<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:12px">'+
+      '<div><div style="font-size:20px;font-weight:800">'+owner+'</div>'+
+        '<div style="font-size:12px;color:var(--text3);margin-top:2px">期初：'+openStr+' <button class="btn-secondary" style="font-size:11px;padding:3px 9px;margin-left:6px" onclick="ownerOpenEditToggle()">编辑期初</button></div>'+
+        '<div id="owner-open-edit" style="display:none;margin-top:6px;gap:6px;align-items:center" class="__flex">'+
+          '<select id="oo-cur" style="background:var(--surface2);border:1.5px solid var(--border2);color:var(--text);padding:6px;border-radius:6px"><option>SGD</option><option>RM</option><option>THB</option><option>IDR</option></select>'+
+          '<input id="oo-amt" type="text" inputmode="decimal" placeholder="金额" style="width:110px;background:var(--surface2);border:1.5px solid var(--border2);color:var(--text);padding:6px 8px;border-radius:6px;font-family:monospace">'+
+          '<button class="btn-primary" style="font-size:12px;padding:6px 12px" onclick="ownerOpenSave(\''+safe+'\')">保存</button>'+
+        '</div></div>'+
+      '<div style="text-align:right"><div style="font-size:11px;color:var(--text3)">当前余额</div>'+
+        '<div style="font-size:18px;margin-top:2px">'+_fmtBuckets(led.buckets)+'</div></div>'+
+    '</div>'+
+    // 快速录入条:一行搞定 来银/付款
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;background:var(--surface);border:1.5px solid var(--border2);border-radius:10px;padding:10px 12px;margin-bottom:12px">'+
+      '<span onclick="_ownerPayType=\'in\';renderOwnerScreen()" style="'+CH+';'+(_ownerPayType==='in'?'background:#059669;color:#fff;border-color:#059669':'')+'">来银</span>'+
+      '<span onclick="_ownerPayType=\'out\';renderOwnerScreen()" style="'+CH+';'+(_ownerPayType==='out'?'background:#ea6c1a;color:#fff;border-color:#ea6c1a':'')+'">付款</span>'+
+      '<input id="op-amt" type="text" inputmode="decimal" placeholder="金额(可算式)" style="width:130px;background:var(--surface2);border:1.5px solid var(--border2);color:var(--text);padding:8px 10px;border-radius:7px;font-family:monospace" onkeydown="if(event.key===\'Enter\')ownerQuickPay(\''+safe+'\')">'+
+      ['RM','SGD','THB','IDR'].map(function(cu){ return '<span onclick="_ownerPayCur=\''+cu+'\';renderOwnerScreen()" style="'+CH+';'+(_ownerPayCur===cu?'background:var(--accent);color:#fff;border-color:var(--accent)':'')+'">'+cu+'</span>'; }).join('')+
+      '<input id="op-note" type="text" placeholder="备注(可空)" style="flex:1;min-width:110px;background:var(--surface2);border:1.5px solid var(--border2);color:var(--text);padding:8px 10px;border-radius:7px" onkeydown="if(event.key===\'Enter\')ownerQuickPay(\''+safe+'\')">'+
+      '<button class="btn-primary" style="font-size:13px;padding:8px 16px" onclick="ownerQuickPay(\''+safe+'\')">✓ 记录</button>'+
+    '</div>'+
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">'+
+      '<button class="btn-secondary" style="font-size:12px;padding:6px 12px" onclick="_ownerShowAlt=!_ownerShowAlt;renderOwnerScreen()">💱 '+(_ownerShowAlt?'显示原值':'显示换算')+'</button>'+
+      '<button onclick="ownerExportExcel(\''+safe+'\')" style="font-size:12px;padding:6px 12px;border-radius:8px;border:none;background:#059669;color:#fff;font-weight:700;cursor:pointer">📊 Excel</button>'+
+      '<button onclick="ownerExportPDF(\''+safe+'\')" style="font-size:12px;padding:6px 12px;border-radius:8px;border:none;background:#dc2626;color:#fff;font-weight:700;cursor:pointer">📄 PDF</button>'+
+      '<button onclick="ownerExportImage(\''+safe+'\')" style="font-size:12px;padding:6px 12px;border-radius:8px;border:none;background:#7c3aed;color:#fff;font-weight:700;cursor:pointer">🖼 图片</button>'+
+    '</div>';
+  var TD='padding:6px 8px;border-bottom:1px solid var(--border);font-size:12px';
+  function lineAmt(l){
+    if(_ownerShowAlt){ return l.alt ? _fmtCur(l.alt.cur, l.alt.amt) : '<span style="color:var(--text3)">—</span>'; }
+    return _fmtCur(l.cur, l.amt);
+  }
+  // 按日分组(新→旧),每天末尾一行「当日小结」:该日交易分币种总额 + 当日汇率
+  var chartsByDay = {};
+  try { (JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]')||[]).forEach(function(cc){ var dd=_chartDay(cc); if(dd) chartsByDay[dd]=cc; }); } catch(e){}
+  function daySummaryRow(day, dayLines){
+    var t={}, pin={}, pout={};
+    dayLines.forEach(function(l){
+      var cu=l.cur||'SGD';
+      if(l.kind==='deal') t[cu]=(t[cu]||0)+l.amt;
+      else if(l.kind==='pay_in') pin[cu]=(pin[cu]||0)+l.amt;
+      else pout[cu]=(pout[cu]||0)+l.amt;
+    });
+    function fmtMap(m){ return Object.keys(m).map(function(k){ return _fmtCur(k,m[k]); }).join(' · '); }
+    var bits=[];
+    if(Object.keys(t).length) bits.push('交易 <b style="font-family:monospace">'+fmtMap(t)+'</b>');
+    if(Object.keys(pin).length) bits.push('<span style="color:var(--green)">来银 '+fmtMap(pin)+'</span>');
+    if(Object.keys(pout).length) bits.push('<span style="color:var(--orange)">付款 '+fmtMap(pout)+'</span>');
+    var r=(chartsByDay[day]||{}).rates||{};
+    var rateBits=[];
+    if(r.sgd>0) rateBits.push('SGD→RM '+r.sgd);
+    if(r.sgdThb>0) rateBits.push('→THB '+r.sgdThb);
+    if(r.sgdIdr>0) rateBits.push('→IDR '+r.sgdIdr);
+    var rateStr = rateBits.length ? '　💱 '+rateBits.join(' · ') : '　💱 <span style="color:var(--yellow)">当日汇率未录</span>';
+    return '<tr><td colspan="5" style="padding:6px 8px;border-bottom:2px solid var(--border2);background:var(--surface2);font-size:11px;color:var(--text2)">📊 '+_dayToName(day)+' 小结：'+(bits.join('　')||'无交易')+rateStr+'</td></tr>';
+  }
+  function lineRow(l){
+    var kindTag = l.kind==='deal' ? '' : (l.kind==='pay_in' ? '<span style="color:var(--green);font-weight:700">来银</span> ' : '<span style="color:var(--orange);font-weight:700">付款</span> ');
+    var amtCol = l.kind==='pay_in' ? 'var(--green)' : (l.kind==='pay_out' ? 'var(--orange)' : 'var(--text)');
+    var sgdMark = (l.kind==='deal' && l.cur==='SGD') ? ' <span style="font-size:9px;color:var(--yellow)">新币付款</span>' : '';
+    var del = (l.kind!=='deal') ? '<button onclick="event.stopPropagation();ownerDelPayUI(\''+l.id+'\',\''+safe+'\')" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px">×</button>' : '';
+    return '<tr>'+
+      '<td style="'+TD+';white-space:nowrap;font-family:monospace">'+_dayToName(l.day)+'</td>'+
+      '<td style="'+TD+'">'+kindTag+(l.name||'')+sgdMark+'</td>'+
+      '<td style="'+TD+';text-align:right;font-family:monospace;font-weight:700;color:'+amtCol+';white-space:nowrap">'+((l.kind==='pay_in')?'−':'')+lineAmt(l)+'</td>'+
+      '<td style="'+TD+';text-align:right;font-family:monospace;white-space:nowrap">'+_fmtCur(l.runCur||l.cur, l.run)+'</td>'+
+      '<td style="'+TD+';width:24px">'+del+'</td>'+
+    '</tr>';
+  }
+  var byDay={}, dayOrder=[];
+  led.lines.forEach(function(l){ if(!byDay[l.day]){ byDay[l.day]=[]; dayOrder.push(l.day); } byDay[l.day].push(l); });
+  dayOrder.sort().reverse();
+  var rows=dayOrder.map(function(day){
+    var dl=byDay[day];
+    return dl.slice().reverse().map(lineRow).join('') + daySummaryRow(day, dl);
+  }).join('');
+  var TH='padding:7px 8px;font-size:11px;border-bottom:2px solid var(--border2);position:sticky;top:0;background:var(--surface2);white-space:nowrap';
+  html+='<div style="overflow:auto"><table id="ol-export-table" style="width:100%;border-collapse:collapse;color:var(--text)">'+
+    '<thead><tr><th style="'+TH+';text-align:left">日期</th><th style="'+TH+';text-align:left">项目</th><th style="'+TH+';text-align:right">金额</th><th style="'+TH+';text-align:right">余额(本币种)</th><th style="'+TH+'"></th></tr></thead>'+
+    '<tbody>'+rows+'</tbody></table></div>';
+  if(!led.lines.length) html+='<div style="text-align:center;color:var(--text3);padding:14px">暂无账目（交易自 '+_dayToName(OWNER_LEDGER_START)+' 起自动计入）</div>';
+  main.innerHTML=html;
+}
+function ownerOpenEditToggle(){ var d=document.getElementById('owner-open-edit'); if(d) d.style.display = d.style.display==='none' ? 'flex' : 'none'; }
+function ownerOpenSave(owner){
+  var cu=(document.getElementById('oo-cur')||{}).value||'SGD';
+  var amt=_parseAmtExpr((document.getElementById('oo-amt')||{}).value);
+  if(isNaN(amt)){ alert('金额无效'); return; }
+  _ownerSetOpen(owner, cu, Math.round(amt*100)/100);
+  renderOwnerScreen();
+}
+function ownerQuickPay(owner){
+  var amt=_parseAmtExpr((document.getElementById('op-amt')||{}).value);
+  if(isNaN(amt)||amt<=0){ alert('金额无效'); return; }
+  var note=(document.getElementById('op-note')||{}).value||'';
+  _ownerAddPay(owner, _ownerPayType, Math.round(amt*100)/100, _ownerPayCur, _dayKey(), note);
+  renderOwnerScreen();
+  var a=document.getElementById('op-amt'); if(a){ a.value=''; a.focus(); }
+  var nt=document.getElementById('op-note'); if(nt) nt.value='';
+}
+function ownerDelPayUI(id, owner){
+  if(!confirm('删除这条来银/付款记录？')) return;
+  _ownerDelPay(id);
+  renderOwnerScreen();
+}
+function _ownerFname(owner, ext){ return 'Owner_'+String(owner).replace(/[\/\:*?"<>|]/g,'-')+'_'+_dayToName(_dayKey()).replace(/\//g,'-')+'.'+ext; }
+function ownerExportExcel(owner){
+  if(typeof XLSX==='undefined'){ alert('XLSX 未加载'); return; }
+  var led=_ownerLedger(owner);
+  var aoa=[['日期','项目','类型','币种','金额','换算参考','余额(本币种)']];
+  var chartsByDay={}; try{ (JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]')||[]).forEach(function(cc){ var dd=_chartDay(cc); if(dd) chartsByDay[dd]=cc; }); }catch(e){}
+  var prevDay=null, dayT={};
+  function flushDay(){
+    if(prevDay===null) return;
+    var r=(chartsByDay[prevDay]||{}).rates||{};
+    var rateStr=[r.sgd>0?('SGD→RM '+r.sgd):'', r.sgdThb>0?('→THB '+r.sgdThb):'', r.sgdIdr>0?('→IDR '+r.sgdIdr):''].filter(Boolean).join(' ');
+    aoa.push(['', _dayToName(prevDay)+' 小结','','', Object.keys(dayT).map(function(k){return k+' '+Math.round(dayT[k]*100)/100;}).join(' / '), rateStr, '']);
+    dayT={};
+  }
+  led.lines.forEach(function(l){
+    if(l.day!==prevDay){ flushDay(); prevDay=l.day; }
+    if(l.kind==='deal') dayT[l.cur]=(dayT[l.cur]||0)+l.amt;
+    aoa.push([_dayToName(l.day), l.name, l.kind==='deal'?'交易':(l.kind==='pay_in'?'来银':'付款'),
+      l.cur, Math.round(l.amt*100)/100, l.alt?(l.alt.cur+' '+Math.round(l.alt.amt*100)/100):'', Math.round(l.run*100)/100]);
+  });
+  flushDay();
+  aoa.push(['','当前余额','','',Object.keys(led.buckets).map(function(k){return k+' '+Math.round(led.buckets[k]*100)/100;}).join(' / '),'','']);
+  var wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(aoa),'Ledger');
+  XLSX.writeFile(wb,_ownerFname(owner,'xlsx'));
+}
+// 导出用:表头(owner名+余额+日期) + 账本表 的离屏包装,截出来的图自带身份信息
+function _ownerExportEl(owner){
+  var tbl=document.getElementById('ol-export-table'); if(!tbl) return null;
+  var led=_ownerLedger(owner);
+  var balTxt=Object.keys(led.buckets).filter(function(k){return Math.abs(led.buckets[k])>=0.005;})
+    .map(function(k){return _fmtCur(k,led.buckets[k]);}).join('  ·  ') || '✓ 清';
+  var wrap=document.createElement('div');
+  wrap.style.cssText='position:fixed;left:-10000px;top:0;width:'+Math.max(tbl.offsetWidth,640)+'px;background:'+_custHistCaptureBg()+';color:var(--text);padding:14px;font-family:IBM Plex Sans,sans-serif';
+  wrap.innerHTML='<div style="font-size:18px;font-weight:800;margin-bottom:2px">💼 '+owner+'</div>'+
+    '<div style="font-size:12px;color:var(--text3);margin-bottom:10px">'+_dayToName(_dayKey())+' · 当前余额：<b style="font-family:monospace">'+balTxt+'</b></div>';
+  wrap.appendChild(tbl.cloneNode(true));
+  document.body.appendChild(wrap);
+  return wrap;
+}
+function ownerExportImage(owner){
+  if(typeof html2canvas==='undefined'){ alert('图片库还在加载，请几秒后再试'); return; }
+  var el=_ownerExportEl(owner); if(!el){ alert('先打开该 Owner 的账本'); return; }
+  html2canvas(el,{backgroundColor:_custHistCaptureBg(),scale:2}).then(function(cv){
+    el.remove();
+    var a=document.createElement('a'); a.href=cv.toDataURL('image/png'); a.download=_ownerFname(owner,'png'); document.body.appendChild(a); a.click(); a.remove();
+  }).catch(function(e){ el.remove(); alert('导出图片失败：'+e); });
+}
+function ownerExportPDF(owner){
+  var JS=(window.jspdf&&window.jspdf.jsPDF)||window.jsPDF;
+  if(typeof html2canvas==='undefined'||!JS){ alert('PDF库还在加载，请几秒后再试'); return; }
+  var el=_ownerExportEl(owner); if(!el){ alert('先打开该 Owner 的账本'); return; }
+  html2canvas(el,{backgroundColor:_custHistCaptureBg(),scale:2}).then(function(cv){
+    el.remove();
+    var pdf=new JS({orientation:'portrait',unit:'pt',format:'a4'});
+    var pw=pdf.internal.pageSize.getWidth()-40, ih=cv.height*(pw/cv.width);
+    pdf.addImage(cv.toDataURL('image/png'),'PNG',20,20,pw,ih);
+    pdf.save(_ownerFname(owner,'pdf'));
+  }).catch(function(e){ el.remove(); alert('导出PDF失败：'+e); });
+}
+
+// ═══ L2 行级审计:这一行的完整履历(时间·设备·来源·操作),数据来自意图台账。═══
+function showRowAudit(id){
+  var e = entries.find(function(x){ return x._id===id; });
+  if(!e) return;
+  var items = [];
+  try { (JSON.parse(localStorage.getItem(INTENTS_KEY)||'[]')||[]).forEach(function(it){
+    if(it && it.ids && it.ids.indexOf(id)>=0) items.push(it);
+  }); } catch(_){}
+  var srcName = {user:'人为', sync:'同步', system:'系统'};
+  var srcColor = {user:'var(--green)', sync:'var(--accent)', system:'var(--yellow)'};
+  var title=document.getElementById('cust-hist-title'), body=document.getElementById('cust-hist-body');
+  if(title) title.textContent = '📜 ' + (e.name||'').replace(/\s*\[C\/D fr [^\]]+\]/g,'');
+  var head = '<div style="padding:10px 12px;background:var(--surface2);border-radius:8px;margin-bottom:10px;font-size:12px">'+
+    '当前：金额 <b style="font-family:monospace">'+fmtN(e.rmAmount||e.amount||0)+'</b> · 分配 <b style="font-family:monospace">'+fmtN((e.act||0)+(e.yes||0)+(e.hs||0)+(e.cash||0)+(e.btHeng||0))+'</b>'+
+    (e.isCD?' · <span style="color:var(--yellow)">带入行</span>':'')+(e.hidden?' · <span style="color:var(--accent)">已隐藏</span>':'')+'</div>';
+  if(!items.length){
+    if(body) body.innerHTML = head + '<div style="text-align:center;color:var(--text3);padding:18px">这行还没有履历记录（凭证台账从本版本开始记录）</div>';
+  } else {
+    if(body) body.innerHTML = head + items.map(function(it){
+      var t=''; try { t=new Date(it.ts).toLocaleString('en-MY',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}); } catch(_){}
+      return '<div style="padding:8px 10px;border-bottom:1px solid var(--border);display:flex;gap:10px;align-items:center;font-size:12px">'+
+        '<span style="font-family:monospace;color:var(--text3);white-space:nowrap">'+t+'</span>'+
+        '<span style="white-space:nowrap">'+(it.dev||'?')+'</span>'+
+        '<span style="color:'+(srcColor[it.src]||'var(--text2)')+';font-weight:700;white-space:nowrap">'+(srcName[it.src]||it.src||'?')+'</span>'+
+        '<span style="flex:1;color:var(--text2)">'+(it.op||'')+(it.d?(' · '+it.d):'')+'</span>'+
+      '</div>';
+    }).join('');
+  }
+  document.getElementById('modal-cust-hist').classList.remove('hidden');
+}
+
 function toggleHideEntry(id){
   var idx = entries.findIndex(function(x){return x._id===id;});
   if(idx<0) return;
@@ -10110,6 +10676,84 @@ function filterHistory(){
   renderHistoryList(filtered);
 }
 
+// ═══ 汇率历史:从最早有汇率记录的那天起,逐日列出(可点✏️补录/修正) ═══
+function openRatesHistory(){
+  var title=document.getElementById('cust-hist-title'), body=document.getElementById('cust-hist-body');
+  if(title) title.textContent='💱 汇率历史';
+  var charts; try{ charts=JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]')||[]; }catch(e){ charts=[]; }
+  var days = charts.filter(function(c){ var r=c&&c.rates||{}; return _chartDay(c) && (r.sgd>0||r.sgdThb>0||r.sgdIdr>0); })
+                   .sort(function(a,b){ var da=_chartDay(a),db=_chartDay(b); return db<da?-1:db>da?1:0; });
+  if(!days.length){ if(body) body.innerHTML='<div style="text-align:center;color:var(--text3);padding:20px">还没有任何一天记录过汇率</div>'; }
+  else {
+    var TD='padding:7px 10px;border-bottom:1px solid var(--border);font-size:12px;font-family:monospace';
+    var TH='padding:7px 10px;font-size:11px;border-bottom:2px solid var(--border2);position:sticky;top:0;background:var(--surface2)';
+    function cell(v){ return v>0 ? v : '<span style="color:var(--text3)">—</span>'; }
+    if(body) body.innerHTML =
+      '<div style="font-size:11px;color:var(--text3);margin-bottom:8px">自 '+_dayToName(_chartDay(days[days.length-1]))+' 起共 '+days.length+' 天有记录</div>'+
+      '<div style="overflow:auto"><table style="width:100%;border-collapse:collapse;color:var(--text)">'+
+      '<thead><tr><th style="'+TH+';text-align:left">日期</th><th style="'+TH+';text-align:right">SGD→RM</th><th style="'+TH+';text-align:right">SGD→THB</th><th style="'+TH+';text-align:right">SGD→IDR</th><th style="'+TH+'"></th></tr></thead><tbody>'+
+      days.map(function(c){ var r=c.rates||{};
+        return '<tr><td style="'+TD+'">'+_dayToName(_chartDay(c))+'</td>'+
+          '<td style="'+TD+';text-align:right">'+cell(r.sgd)+'</td>'+
+          '<td style="'+TD+';text-align:right">'+cell(r.sgdThb)+'</td>'+
+          '<td style="'+TD+';text-align:right">'+cell(r.sgdIdr)+'</td>'+
+          '<td style="'+TD+';width:30px"><button onclick="editChartRates(\''+String(c.id)+'\')" style="background:none;border:1px solid var(--border2);border-radius:5px;color:var(--text2);cursor:pointer;font-size:10px;padding:1px 6px">✏️</button></td></tr>';
+      }).join('')+'</tbody></table></div>';
+  }
+  document.getElementById('modal-cust-hist').classList.remove('hidden');
+}
+
+// ═══ 行级操作履历按钮:默认隐藏,设置里开关 ═══
+function _rowAuditVisible(){ return localStorage.getItem('mg_show_row_audit')==='1'; }
+function toggleRowAuditVisible(){
+  var on = !_rowAuditVisible();
+  localStorage.setItem('mg_show_row_audit', on?'1':'0');
+  var st=document.getElementById('row-audit-state'); if(st) st.textContent='当前：'+(on?'显示':'隐藏');
+  if(typeof renderAll==='function') renderAll();
+  if(typeof _showSuccessToast==='function') _showSuccessToast('操作履历按钮已'+(on?'显示':'隐藏'));
+}
+try { document.addEventListener('DOMContentLoaded', function(){ var st=document.getElementById('row-audit-state'); if(st) st.textContent='当前：'+(_rowAuditVisible()?'显示':'隐藏'); }); } catch(e){}
+
+// 补录/修正某一天的汇率(只改 c.rates,不动记录;owner 账本换算自动跟着回正)
+function editChartRates(cid){
+  var charts; try{ charts=JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]'); }catch(e){ return; }
+  var c = charts.find(function(x){ return x && String(x.id)===String(cid); });
+  if(!c) return;
+  var r = c.rates||{};
+  var title=document.getElementById('cust-hist-title'), body=document.getElementById('cust-hist-body');
+  if(title) title.textContent='💱 '+(c.name||'')+' 当日汇率';
+  var S='width:120px;background:var(--surface2);border:1.5px solid var(--border2);color:var(--text);padding:7px 9px;border-radius:6px;font-size:13px;font-family:monospace';
+  function row(lbl,id,v,step){ return '<div style="display:flex;align-items:center;gap:10px;margin-bottom:9px"><span style="width:110px;font-size:13px">'+lbl+'</span><input type="number" step="'+step+'" id="'+id+'" value="'+(v||'')+'" style="'+S+'"></div>'; }
+  if(body) body.innerHTML =
+    '<div style="font-size:11px;color:var(--text3);margin-bottom:10px">补录/修正这一天输入的汇率。保存后该日的换算（含 Owner 账本）自动更新。</div>'+
+    row('1 SGD → RM','ecr-sgd',r.sgd,'0.0001')+
+    row('1 SGD → THB','ecr-sgdthb',r.sgdThb,'0.1')+
+    row('1 SGD → IDR','ecr-sgdidr',r.sgdIdr,'100')+
+    row('1 THB → RM','ecr-thb',r.thb,'0.0001')+
+    row('1 IDR → RM','ecr-idr',r.idr,'0.000001')+
+    '<div class="btn-row" style="margin-top:12px">'+
+      '<button class="btn-secondary" onclick="closeModal(\'modal-cust-hist\')">取消</button>'+
+      '<button class="btn-primary" onclick="saveChartRates(\''+String(cid)+'\')">保存</button></div>';
+  document.getElementById('modal-cust-hist').classList.remove('hidden');
+}
+function saveChartRates(cid){
+  var charts; try{ charts=JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]'); }catch(e){ return; }
+  var idx = charts.findIndex(function(x){ return x && String(x.id)===String(cid); });
+  if(idx<0) return;
+  function gv(id){ var v=parseFloat((document.getElementById(id)||{}).value); return (isNaN(v)||v<=0)?null:v; }
+  var nr = { sgd:gv('ecr-sgd'), sgdThb:gv('ecr-sgdthb'), sgdIdr:gv('ecr-sgdidr'), thb:gv('ecr-thb'), idr:gv('ecr-idr') };
+  charts[idx].rates = nr;
+  charts[idx].date = new Date().toISOString();
+  safeSetItem(CHARTS_KEY, JSON.stringify(charts));
+  if(typeof _logOp==='function') _logOp('edit','补录汇率：'+(charts[idx].name||'')+' SGD→RM '+(nr.sgd||'—'));
+  if(typeof _bumpAction==='function') _bumpAction();
+  // 补的是今天 → 同步刷新在用汇率
+  try { if(_chartDay(charts[idx])===_dayKey()){ rates=_backfillRawRates(Object.assign({},rates,nr)); populateRateInputs(); } } catch(e){}
+  if(typeof _pushToDrive==='function') _pushToDrive();
+  closeModal('modal-cust-hist');
+  if(typeof _showSuccessToast==='function') _showSuccessToast('已保存 '+(charts[idx].name||'')+' 的汇率');
+  try { openHistory(); } catch(e){}
+}
 function renderHistoryList(charts){
   var el = document.getElementById('history-list');
   if(!el) return;
@@ -10125,11 +10769,30 @@ function renderHistoryList(charts){
     // re-sorted asynchronously by Drive sync, so a positional index can point
     // to the wrong chart by the time the user clicks Load/Delete.
     var cid = String(c.id);
-    var gRM = c.entries.filter(function(e){return e.group!=='RP';}).reduce(function(s,e){return s+(e.rmAmount||0);},0);
+    // ── 当日小结:分币种总额 + 客户数 ──
+    var gRM=0, gTHB=0, gIDR=0, gSGD=0, nCust=0;
+    c.entries.forEach(function(e){
+      if(!e) return; nCust++;
+      if(e.sgdPending || e.currency==='SGD'){ gSGD += (e.amount||e.sgdAmount||0); return; }
+      if(e.group==='RP'){ gIDR += (e.amount||0); return; }
+      if(e.group==='THB'){ gTHB += (e.amount||0); gRM += (e.rmAmount||0); return; }
+      gRM += (e.rmAmount||0);
+    });
+    var sumBits = ['<b>'+nCust+'</b> 客户', 'RM <b style="font-family:monospace">'+fmtN(gRM)+'</b>'];
+    if(gTHB) sumBits.push('THB <b style="font-family:monospace">'+fmtN(gTHB)+'</b>');
+    if(gIDR) sumBits.push('IDR <b style="font-family:monospace">'+Math.round(gIDR).toLocaleString()+'</b>');
+    if(gSGD) sumBits.push('SGD <b style="font-family:monospace">'+fmtN(gSGD)+'</b>');
     return '<div class="hist-item">' +
       '<div class="hist-info">' +
         '<div class="hist-name">'+c.name+'</div>' +
-        '<div class="hist-meta">'+c.entries.length+' entries · RM '+fmtN(gRM)+' · <span style="color:var(--text3)">编辑于 '+new Date(c.date).toLocaleString('en-MY')+'</span></div>' +
+        '<div class="hist-meta" style="margin-top:2px">📊 小结：'+sumBits.join(' · ')+'</div>' +
+        '<div class="hist-meta" style="margin-top:2px;color:var(--text3)">编辑于 '+new Date(c.date).toLocaleString('en-MY')+'</div>' +
+        (function(){
+          var r=c.rates||{};
+          function seg(lbl,v){ return v>0 ? lbl+' '+v : '<span style="color:var(--yellow)">'+lbl+' 未录</span>'; }
+          return '<div class="hist-meta" style="margin-top:2px">💱 '+seg('SGD→RM',r.sgd)+' · '+seg('→THB',r.sgdThb)+' · '+seg('→IDR',r.sgdIdr)+
+            ' <button onclick="event.stopPropagation();editChartRates(\''+cid+'\')" style="background:none;border:1px solid var(--border2);border-radius:5px;color:var(--text2);cursor:pointer;font-size:10px;padding:1px 6px;margin-left:6px">✏️ 汇率</button></div>';
+        })() +
       '</div>' +
       '<button class="tb-btn teal" onclick="viewChartReadonly(\''+cid+'\')">📖 '+(isEng?'View':'查看')+'</button>' +
       '<button class="tb-btn" onclick="viewChartCustomers(\''+cid+'\')" style="color:var(--pbb);border-color:rgba(168,127,255,.3)" title="客户历史">👤</button>' +
@@ -10610,6 +11273,7 @@ function init(){
     if(typeof _cdRemoveSelfCarryV1 === 'function') _cdRemoveSelfCarryV1();   // remove "self-carry" rows (fr today)
     if(typeof _cdEnforceDismissals === 'function') _cdEnforceDismissals();   // apply other devices' deletions
     if(typeof _cdEnforceFreshCarries === 'function') _cdEnforceFreshCarries();  // strip stale-source carries (only last working day is valid)
+    if(typeof _bootIntegrityV1 === 'function') setTimeout(_bootIntegrityV1, 1200);  // 开机体检(等清理跑完)
     _mgRotationDone = true;                          // today's chart is ready
     if(typeof _maybeAutoCarry === 'function'){
       _maybeAutoCarry();                             // if the first pull already landed, carry now
@@ -10876,12 +11540,24 @@ function MGApplyFix(id, patch){
   function log(sev,code,msg){ try{var l=gj(LOG,[]); l.unshift({ts:Date.now(),sev:sev,code:code,msg:msg}); if(l.length>200)l=l.slice(0,200); sset(LOG,l);}catch(e){} }
   function backup(reason){ try{var p=gj(BK,[]); p.unshift({ts:Date.now(),replacedAt:new Date().toISOString(),original:{id:'audit_'+Date.now(),name:'监管自动备份（'+reason+'）',date:new Date().toISOString(),entries:gj('mg_entries',[])}}); if(p.length>5)p=p.slice(0,5); sset(BK,p);}catch(e){} }
   // The ONLY business-data write: an auto-repair. Backs up first, then re-syncs the app.
-  function writeEntries(arr,reason){ backup(reason); sset('mg_entries',arr); try{localStorage.setItem('mg_last_write',String(Date.now()));}catch(e){} try{localStorage.setItem('mg_action_seq',String(seq()+1));}catch(e){} if(typeof window.MGReloadEntries==='function') window.MGReloadEntries(); snap=null; }
+  function writeEntries(arr,reason){ backup(reason); sset('mg_entries',arr); try{localStorage.setItem('mg_last_write',String(Date.now()));}catch(e){} try{localStorage.setItem('mg_action_seq',String(seq()+1));}catch(e){} try{ if(typeof window._intentLog==='function') window._intentLog('system','repair·'+reason, (arr||[]).map(function(e){return e&&e._id;}).filter(Boolean).slice(0,120)); }catch(e){} if(typeof window.MGReloadEntries==='function') window.MGReloadEntries(); snap=null; }
 
+  function rowSig(e){ return JSON.stringify([e.amount,e.rmAmount,e.act,e.yes,e.hs,e.cash,e.btHeng,e.hidden,e.owner,e.name]); }
   function buildSnap(entries){
     var ids={},fields={};
-    (entries||[]).forEach(function(e){ if(e&&e._id){ ids[e._id]=1; fields[e._id]={a:e.amount,c1:e.act,y:e.yes,h:e.hs,ca:e.cash,b:e.btHeng}; } });
-    return { seq:seq(), ids:ids, fields:fields, rates:JSON.stringify(gj('mg_rates',{})) };
+    (entries||[]).forEach(function(e){ if(e&&e._id){ ids[e._id]=1; fields[e._id]=rowSig(e); } });
+    // Intent WATERMARK: receipts at/before this moment are already reflected in this baseline —
+    // only receipts issued AFTER it can explain a subsequent change. (A time-window here let an
+    // old receipt "excuse" later tampering of the same row; the watermark closes that hole.)
+    var iw=0; try { var a=gj('mg_intents',[]); if(a&&a[0]&&a[0].ts) iw=a[0].ts; } catch(e){}
+    return { at:Date.now(), iw:iw, seq:seq(), ids:ids, fields:fields, rates:JSON.stringify(gj('mg_rates',{})) };
+  }
+  // Auto-repair circuit breaker: the same repair firing ≥3 times in 60s means we're fighting
+  // something (or looping) — stop auto-repairing and surface a card instead.
+  var _repHist={};
+  function repBreaker(code){
+    var now=Date.now(); var a=(_repHist[code]||[]).filter(function(t){return now-t<60000;});
+    a.push(now); _repHist[code]=a; return a.length>=3;
   }
   function rebaseline(entries,rates){ snap=buildSnap(entries); sset(LG,{entries:entries,rates:JSON.stringify(rates||{}),at:Date.now()}); }
 
@@ -10916,37 +11592,51 @@ function MGApplyFix(id, patch){
     if(charts!==null && !Array.isArray(charts)){ F.push({sev:'high',code:'struct2',card:true,msg:'表格存储损坏，请联系老板'}); charts=null; }
     if(!Array.isArray(entries)) return F;
 
-    // ===== behaviour conservation (ghosts) — only when NO legitimate action happened =====
-    // Double gate: the counter must be unmoved AND the op-log must show no recent human/app
-    // mutation. If the op-log DOES explain the change, ADOPT it as the new baseline (just
-    // skipping would revert it later when the grace window expires).
-    if(snap && curSeq===snap.seq && humanRecent(10000)){
-      var _curChk=buildSnap(entries);
-      if(JSON.stringify(_curChk.ids)!==JSON.stringify(snap.ids) || JSON.stringify(_curChk.fields)!==JSON.stringify(snap.fields) || _curChk.rates!==snap.rates){
-        snap=null;   // tick() re-baselines from the current (explained) state
-      }
-    }
-    if(snap && curSeq===snap.seq && !humanRecent(10000)){
+    // ===== behaviour conservation — INTENT-LEDGER AUDIT (evidence, not time-window guessing) =====
+    // When the counter hasn't moved but the state changed, reconcile ROW BY ROW against the
+    // intent ledger: a changed/added/removed row covered by a receipt (user action, sync merge,
+    // system repair) is legitimate and ADOPTED; a row with NO receipt is a system error and is
+    // surgically reverted — ONLY that row, from the same-day last-good. Wholesale restores are
+    // gone (they used to clobber concurrent legitimate work).
+    if(snap && curSeq===snap.seq){
       var cur=buildSnap(entries);
-      var added=[],removed=[];
-      Object.keys(cur.ids).forEach(function(id){ if(!snap.ids[id]) added.push(id); });
+      var added=[],removed=[],changed=[];
+      Object.keys(cur.ids).forEach(function(id){ if(!snap.ids[id]) added.push(id); else if(cur.fields[id]!==snap.fields[id]) changed.push(id); });
       Object.keys(snap.ids).forEach(function(id){ if(!cur.ids[id]) removed.push(id); });
-      var lg=gj(LG,null);
-      // Only ever restore a SAME-DAY last-good (never silently bring back yesterday's data).
-      var lgT = lg && Array.isArray(lg.entries) && lg.at && (dk(lg.at)===dk());
-      if(added.length||removed.length){
-        F.push({sev:'high',code:'ghost_member',auto:true,msg:'已自动拦下一次幽灵客户变动（无操作下 +'+added.length+' / -'+removed.length+'）',
-          repair:function(){ if(lgT) writeEntries(lg.entries,'幽灵客户'); }});
-      } else {
-        var fieldGhost=false;
-        Object.keys(cur.fields).forEach(function(id){ var a=cur.fields[id],b=snap.fields[id]; if(!b)return; ['a','c1','y','h','ca','b'].forEach(function(k){ if((a[k]||0)!==(b[k]||0)) fieldGhost=true; }); });
-        if(fieldGhost){
-          F.push({sev:'high',code:'ghost_field',auto:true,msg:'已自动拦下一次幽灵金额/分配变动（无操作下数值自己变）',
-            repair:function(){ if(lgT) writeEntries(lg.entries,'幽灵金额'); }});
-        } else if(cur.rates!==snap.rates && !recentOp(['sync_apply'],6000)){
-          F.push({sev:'med',code:'ghost_rate',auto:true,msg:'已自动还原一次幽灵汇率变动',
-            repair:function(){ if(lg&&lg.rates){ sset('mg_rates',lg.rates); } snap=null; }});
+      if(added.length||removed.length||changed.length){
+        var covered={};
+        try { if(typeof window._intentsSince==='function'){
+          window._intentsSince((snap.iw||0)+1).forEach(function(it){ (it.ids||[]).forEach(function(id){ covered[id]=1; }); });
+        } } catch(e){}
+        var uAdd=added.filter(function(id){return !covered[id];});
+        var uRem=removed.filter(function(id){return !covered[id];});
+        var uChg=changed.filter(function(id){return !covered[id];});
+        if(!uAdd.length && !uRem.length && !uChg.length){
+          snap=null;                                   // fully receipted → adopt as new baseline
+        } else if(humanRecent(10000)){
+          snap=null;                                   // grace: operator actively working → adopt
+        } else {
+          var lg=gj(LG,null);
+          var lgT = lg && Array.isArray(lg.entries) && lg.at && (dk(lg.at)===dk());   // same-day only
+          var nBad=uAdd.length+uRem.length+uChg.length;
+          if(repBreaker('ghost_row')){
+            F.push({sev:'high',code:'ghost_loop',card:true,msg:'幽灵行反复出现（'+nBad+' 行），自动修复已暂停，请检查'});
+          } else {
+            F.push({sev:'high',code:'ghost_row',auto:true,msg:'已拦下 '+nBad+' 行无凭证变动（+'+uAdd.length+' / -'+uRem.length+' / ±'+uChg.length+'），已按行还原',
+              repair:function(){
+                if(!lgT) return;
+                var lgById={}; lg.entries.forEach(function(e){ if(e&&e._id) lgById[e._id]=e; });
+                var arr=(gj('mg_entries',[])||[]).filter(function(e){ return !(e&&e._id&&uAdd.indexOf(e._id)>=0); });   // drop unexplained additions
+                arr=arr.map(function(e){ return (e&&e._id&&uChg.indexOf(e._id)>=0&&lgById[e._id]) ? lgById[e._id] : e; }); // restore unexplained edits
+                uRem.forEach(function(id){ if(lgById[id] && !arr.some(function(e){return e&&e._id===id;})) arr.push(lgById[id]); }); // resurrect unexplained deletions
+                writeEntries(arr,'幽灵行修复');
+              }});
+          }
         }
+      } else if(cur.rates!==snap.rates && !recentOp(['sync_apply'],6000) && !humanRecent(6000)
+                && (now - parseInt(localStorage.getItem('mg_rates_edit_at')||'0')) > 8000){
+        F.push({sev:'med',code:'ghost_rate',auto:true,msg:'已自动还原一次幽灵汇率变动',
+          repair:function(){ var lg2=gj(LG,null); if(lg2&&lg2.rates){ sset('mg_rates',lg2.rates); } snap=null; }});
       }
     }
 
@@ -10965,7 +11655,11 @@ function MGApplyFix(id, patch){
     }
     var ld=gj('mg_lastdel',null);
     if(ld&&ld.ids&&ld.ids.length&&(now-(ld.at||0))<8000&&(now-(ld.at||0))>1500){
-      var still=entries.filter(function(e){return e&&ld.ids.indexOf(e._id)>=0;});
+      // Only rows whose tombstone is still ACTIVE count — an UNDO clears the tombstone
+      // (stamps c), and re-deleting an undone row would be the watchdog fighting the user.
+      var _tb10=tomb();
+      var still=entries.filter(function(e){ if(!(e&&ld.ids.indexOf(e._id)>=0)) return false; var t=_tb10[e._id]; return t && (typeof t==='number' ? true : (t.t && t.t>(t.c||0))); });
+      if(!still.length && entries.some(function(e){return e&&ld.ids.indexOf(e._id)>=0;})){ try{localStorage.removeItem('mg_lastdel');}catch(e){} }
       if(still.length){
         F.push({sev:'high',code:'lost_del',auto:true,msg:'刚删除的 '+still.length+' 笔还在，已重新删除',
           repair:function(){ var arr=(gj('mg_entries',[])||[]).filter(function(e){return !(e&&ld.ids.indexOf(e._id)>=0);}); writeEntries(arr,'删除没生效重删'); try{localStorage.removeItem('mg_lastdel');}catch(e){} }});
