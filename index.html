@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260720002649 -->
+<!-- MG Fishery Contra System v20260720192120 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260720002649';  /*BUILD*/
+window.__APP_VER__ = '20260720192120';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -549,9 +549,11 @@ body.fs-sm .contra-table th{font-size:9px}
 body.fs-lg{font-size:15px}
 body.fs-lg .contra-table td{font-size:14px;padding:8px 10px}
 body.fs-lg .alloc-input{font-size:14px}
-/* 平板/窄屏:表格在自身容器内横向滚动,页面主体绝不左右晃 */
+/* 表格在自身容器内横向滚动,页面主体绝不左右晃(用外层 div 滚动,不改表格自身 display,避免部分平板/webview 对 table{display:block} 的渲染缺陷导致内容被裁剪) */
+.table-scroll-wrap{width:100%;max-width:100%;overflow-x:auto;-webkit-overflow-scrolling:touch}
+.table-scroll-wrap>.contra-table{width:100%}
 @media (max-width:900px){
-  .contra-table{display:block;overflow-x:auto;max-width:100%;-webkit-overflow-scrolling:touch}
+  .table-scroll-wrap>.contra-table{width:max-content;min-width:100%}
 }
 /* Shortcut badge */
 .shortcut-badge{
@@ -3699,7 +3701,7 @@ function renderAll(){
           <div class="bank-unalloc ${grpUnalloc<0.01?'zero':''}" data-grp-unalloc="${group}">${isRP?fmtN(grpUnalloc)+' unalloc':isTHB?fmtN(grpUnalloc)+' unalloc':fmtRM(grpUnalloc)+' unalloc'}</div>
         </div>
       </div>
-      <table class="contra-table">
+      <div class="table-scroll-wrap"><table class="contra-table">
         <thead><tr>
           <th class="batch-only-col" style="width:30px"><input type="checkbox" class="row-sel" onclick="toggleSelectAll(this,'${group}')" title="全选本组"></th>
           <th style="width:32px">No</th>
@@ -3711,7 +3713,7 @@ function renderAll(){
           <th>Owner</th><th style="width:54px"></th>
         </tr></thead>
         <tbody id="tbody-${group}"></tbody>
-      </table>`;
+      </table></div>`;
     container.appendChild(section);
 
     const tbody=document.getElementById('tbody-'+group);
@@ -7522,7 +7524,7 @@ function exportPDF(printMode){
   const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260720002649 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260720192120 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
