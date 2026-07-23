@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260720192120 -->
+<!-- MG Fishery Contra System v20260724001646 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260720192120';  /*BUILD*/
+window.__APP_VER__ = '20260724001646';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -7524,7 +7524,7 @@ function exportPDF(printMode){
   const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260720192120 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260724001646 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
@@ -10106,14 +10106,29 @@ function batchExportExcel(){
 
 // ═══════════════════════════════════════════════════════════════════════════
 // OWNER 账本 — 每位负责人(owner)的档案:名下交易(自动跟随每日表格) + 来银/付款 + 期初,
-// 统一以 SGD 记账(按"那一天表格里存的汇率"换算),余额 = 期初 + 交易 − 来银 + 付款(欠我型)。
+// 统一以单一新币(SGD)数字记账(按"那一天表格里存的汇率"把原币换算成 SGD 再计入)。
+// 余额 = 我欠 owner 型:正数=我还欠 owner 这么多,负数=owner 欠我这么多。
+// 每笔交易 = 用户先替 owner 垫付给顾客 → 减少"我欠owner"(owner 欠我方向变多);
+// 来银(owner 还钱给我)→ 增加"我欠owner";付款(我给 owner 钱)→ 减少"我欠owner"。
+// 余额 = 期初 − 交易 + 来银 − 付款(2026-07-23 用户订正,取代旧的"欠我型"分币种分桶版本)。
 // 交易线是动态推导(不落盘):改表、补汇率,账本自动跟着变,零重复录入、零脱节。
 // ═══════════════════════════════════════════════════════════════════════════
 var OWNER_LEDGER_START = '2026-07-20';   // 干净起点(用户指定 20/7):该日起交易自动入账,之前一律不计
 var OWNER_PAY_KEY  = 'mg_owner_pay';
 var OWNER_OPEN_KEY = 'mg_owner_open';
-function _ownerPays(){ try{ return JSON.parse(localStorage.getItem(OWNER_PAY_KEY)||'[]')||[]; }catch(e){ return []; } }
-function _ownerOpens(){ try{ return JSON.parse(localStorage.getItem(OWNER_OPEN_KEY)||'{}')||{}; }catch(e){ return {}; } }
+var OWNER_V2_EPOCH = 1784736461008;      // 单一SGD余额版上线时刻:之前录的期初/来银/付款(旧分币种模型)一律不计,用户已确认无需迁移
+function _ownerPays(){ try{ var a=JSON.parse(localStorage.getItem(OWNER_PAY_KEY)||'[]')||[]; return a.filter(function(r){return r && (r.updatedAt||0)>=OWNER_V2_EPOCH;}); }catch(e){ return []; } }
+function _ownerOpens(){ try{ var m=JSON.parse(localStorage.getItem(OWNER_OPEN_KEY)||'{}')||{}, out={}; Object.keys(m).forEach(function(o){ var rec=m[o]; if(rec && (rec.updatedAt||0)>=OWNER_V2_EPOCH) out[o]=rec; }); return out; }catch(e){ return {}; } }
+// 原币 → 当天SGD(汇率缺 → null=待定,不计入余额,补录汇率后自动生效)
+function _ownerConvSGD(amt, cur, cr){
+  cr = cr || {};
+  if(!amt) return 0;
+  if(!cur || cur==='SGD') return amt;
+  if(cur==='RM')  return cr.sgd>0    ? amt/cr.sgd    : null;
+  if(cur==='THB') return cr.sgdThb>0 ? amt/cr.sgdThb : null;
+  if(cur==='IDR') return cr.sgdIdr>0 ? amt/cr.sgdIdr : null;
+  return null;
+}
 // 单行的账本值:币种 = 客户实际付款的币种。
 //   • 触发过换算(conv 且与当前金额自洽)或原始输入就是新币 → 记 SGD(alt=换算后的原币,可切换看)
 //   • 其余(RM/THB/IDR 原币录入) → 记原币(alt=按当日汇率折的 SGD,仅供切换参考,可能缺)
@@ -10164,7 +10179,8 @@ function _ownerDealLines(){
       if(!r.amt) return;
       var o = String(e.owner).trim();
       if(!o) return;
-      (map[o] = map[o] || []).push({ kind:'deal', day:day, name:(e.name||'').replace(/\s*\[C\/D fr [^\]]+\]/g,''), cur:r.cur, amt:r.amt, alt:r.alt, id:e._id });
+      var sgd = r.cur==='SGD' ? r.amt : (r.alt && r.alt.cur==='SGD' ? r.alt.amt : null);   // 权威SGD值(null=当天无汇率,待定)
+      (map[o] = map[o] || []).push({ kind:'deal', day:day, name:(e.name||'').replace(/\s*\[C\/D fr [^\]]+\]/g,''), cur:r.cur, amt:r.amt, alt:r.alt, sgd:sgd, id:e._id });
     });
   });
   return map;
@@ -10172,25 +10188,32 @@ function _ownerDealLines(){
 // 一位 owner 的完整账目(交易 + 来银/付款),按日期升序(供滚动余额)
 function _ownerLedger(owner){
   var lines = (_ownerDealLines()[owner] || []).slice();
+  var chartsByDay = {};
+  try { (JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]')||[]).forEach(function(cc){ var dd=_chartDay(cc); if(dd) chartsByDay[dd]=cc; }); } catch(e){}
   _ownerPays().forEach(function(pRec){
     if(!pRec || pRec.del || pRec.owner !== owner) return;
+    var cur = pRec.cur||'SGD';
+    var nativeAmt = (pRec.amt!=null?pRec.amt:pRec.sgd)||0;
+    var cr = (chartsByDay[pRec.day]||{}).rates || {};
+    var sgd = _ownerConvSGD(nativeAmt, cur, cr);
+    var alt = (cur!=='SGD' && sgd!=null) ? { cur:'SGD', amt:sgd } : (cur==='SGD' ? null : null);
     lines.push({ kind:pRec.type==='in'?'pay_in':'pay_out', day:pRec.day, name:pRec.note||'',
-                 cur:(pRec.cur||'SGD'), amt:(pRec.amt!=null?pRec.amt:pRec.sgd)||0, alt:null, id:pRec._id });
+                 cur:cur, amt:nativeAmt, alt:alt, sgd:sgd, id:pRec._id });
   });
   lines.sort(function(a,b){ return a.day<b.day?-1:a.day>b.day?1:0; });
-  // 余额按币种分桶:每个币种独立 期初+交易−来银+付款
+  // 单一 SGD 余额(我欠owner型):正数=我还欠owner,负数=owner欠我
+  // 期初 − 交易(垫付,owner欠我方向) + 来银(owner还我) − 付款(我给他)
   var openRec = _ownerOpens()[owner]||{};
-  var open = openRec.bal || (openRec.sgd!=null ? {SGD:openRec.sgd} : {});
-  var buckets = {}; Object.keys(open).forEach(function(cu){ if(open[cu]) buckets[cu]=open[cu]; });
+  var open = (openRec.sgd!=null) ? openRec.sgd : 0;
+  var bal = open;
   lines.forEach(function(l){
-    var cu=l.cur||'SGD';
-    if(!(cu in buckets)) buckets[cu]=0;
-    if(l.kind==='deal') buckets[cu]+=l.amt;
-    else if(l.kind==='pay_in') buckets[cu]-=l.amt;
-    else buckets[cu]+=l.amt;                                 // 付款(我付给他) → 该币种欠我更多
-    l.run = buckets[cu]; l.runCur = cu;                      // 滚动余额 = 本币种桶
+    if(l.sgd==null){ l.pending=true; l.run=bal; return; }     // 当天无汇率 → 待定,不计入余额
+    if(l.kind==='deal') bal -= l.sgd;
+    else if(l.kind==='pay_in') bal += l.sgd;
+    else bal -= l.sgd;                                        // 付款(我给他) → 我欠他的变少
+    l.run = bal;
   });
-  return { open:open, lines:lines, buckets:buckets };
+  return { open:open, lines:lines, balance:bal };
 }
 function _ownerNames(){
   var set = {};
@@ -10217,14 +10240,11 @@ function _ownerDelPay(id){
   if(typeof _logOp==='function') _logOp('owner_pay', '删除'+(hit.type==='in'?'来银':'付款')+'：'+hit.owner+' '+(hit.cur||'SGD')+' '+((hit.amt!=null?hit.amt:hit.sgd)||0));
   if(typeof _pushToDrive==='function') _pushToDrive();
 }
-function _ownerSetOpen(owner, cur, amt){
+function _ownerSetOpen(owner, amt){
   var m = _ownerOpens();
-  var rec = m[owner] || {};
-  var bal = rec.bal || (rec.sgd!=null ? {SGD:rec.sgd} : {});
-  bal[cur||'SGD'] = amt;
-  m[owner] = { bal:bal, updatedAt:Date.now() };
+  m[owner] = { sgd:amt, updatedAt:Date.now() };
   safeSetItem(OWNER_OPEN_KEY, JSON.stringify(m));
-  if(typeof _logOp==='function') _logOp('owner_pay', '期初余额：'+owner+' '+(cur||'SGD')+' '+amt);
+  if(typeof _logOp==='function') _logOp('owner_pay', '期初余额：'+owner+' SGD '+amt);
   if(typeof _pushToDrive==='function') _pushToDrive();
 }
 
@@ -10232,17 +10252,18 @@ function _ownerSetOpen(owner, cur, amt){
 var _ownerShowAlt = false;    // 💱 切换:显示换算参考值(SGD行→原币 / 原币行→SGD)
 var _ownerSel = null;         // 当前选中的 owner
 var _ownerPayType = 'in';     // 快速录入条:来银/付款
-var _ownerPayCur = 'RM';      // 快速录入条:币种(默认RM;SGD仅在明确选择时)
+var _ownerPayCur = 'SGD';     // 快速录入条:币种(默认SGD)
+var _ownerRangeFrom = '';     // 日期范围筛选(不影响顶部总余额,只筛显示/导出的账目行)
+var _ownerRangeTo = '';
 function _fmtCur(cur, amt){
   if(cur==='IDR') return 'IDR '+Math.round(amt).toLocaleString();
   return cur+' '+fmtN(Math.round(amt*100)/100);
 }
-function _fmtBuckets(b, sep){
-  var ks = Object.keys(b).filter(function(k){ return Math.abs(b[k])>=0.005; });
-  if(!ks.length) return '<span style="color:var(--green)">✓ 清</span>';
-  var ord = {SGD:0, RM:1, THB:2, IDR:3};
-  ks.sort(function(a,x){ return (ord[a]||9)-(ord[x]||9); });
-  return ks.map(function(k){ var col = b[k]>0?'var(--red)':'var(--accent)'; return '<span style="color:'+col+';font-family:monospace;font-weight:800">'+_fmtCur(k,b[k])+'</span>'; }).join(sep||' · ');
+// 单一 SGD 余额显示:正数=我欠owner(中性色),负数=owner欠我(警示色),0=已结清
+function _fmtOwnerBal(sgd){
+  if(Math.abs(sgd) < 0.005) return '<span style="color:var(--green)">✓ 清</span>';
+  var col = sgd<0 ? 'var(--red)' : 'var(--accent)';
+  return '<span style="color:'+col+';font-family:monospace;font-weight:800">'+_fmtCur('SGD',sgd)+'</span>';
 }
 function openOwnerPanel(){ if(!_ownerSel){ var ns=_ownerNames(); _ownerSel = ns.length?ns[0]:null; } renderOwnerScreen(); document.getElementById('owner-screen').style.display='block'; }
 function openOwnerDetail(owner){ _ownerSel = owner; renderOwnerScreen(); document.getElementById('owner-screen').style.display='block'; }
@@ -10257,35 +10278,40 @@ function renderOwnerScreen(){
     var sel = (o===_ownerSel);
     return '<div onclick="openOwnerDetail(\''+safe+'\')" style="padding:9px 10px;border-radius:8px;cursor:pointer;margin-bottom:4px;'+(sel?'background:var(--surface2);border:1.5px solid var(--border2)':'border:1.5px solid transparent')+'">'+
       '<div style="font-weight:700;font-size:13px">'+o+'</div>'+
-      '<div style="font-size:11px;margin-top:2px">'+_fmtBuckets(led.buckets,'<br>')+'</div></div>';
+      '<div style="font-size:11px;margin-top:2px">'+_fmtOwnerBal(led.balance)+'</div></div>';
   }).join('') || '<div style="color:var(--text3);padding:10px;font-size:12px">暂无 owner</div>';
   if(!_ownerSel){ main.innerHTML='<div style="color:var(--text3);padding:24px">左侧选择一位 owner</div>'; return; }
   var owner=_ownerSel, led=_ownerLedger(owner);
   var safe=owner.replace(/\\/g,'\\\\').replace(/'/g,"\\'");
-  var openStr = Object.keys(led.open).filter(function(k){return led.open[k];}).map(function(k){return _fmtCur(k,led.open[k]);}).join(' · ') || '0';
+  var openStr = led.open ? _fmtCur('SGD',led.open) : '0';
   var CH='padding:5px 10px;border-radius:7px;border:1.5px solid var(--border2);cursor:pointer;font-size:12px;user-select:none';
   var html =
     '<div style="display:flex;justify-content:space-between;align-items:flex-start;flex-wrap:wrap;gap:10px;margin-bottom:12px">'+
       '<div><div style="font-size:20px;font-weight:800">'+owner+'</div>'+
         '<div style="font-size:12px;color:var(--text3);margin-top:2px">期初：'+openStr+' <button class="btn-secondary" style="font-size:11px;padding:3px 9px;margin-left:6px" onclick="ownerOpenEditToggle()">编辑期初</button></div>'+
         '<div id="owner-open-edit" style="display:none;margin-top:6px;gap:6px;align-items:center" class="__flex">'+
-          '<select id="oo-cur" style="background:var(--surface2);border:1.5px solid var(--border2);color:var(--text);padding:6px;border-radius:6px"><option>SGD</option><option>RM</option><option>THB</option><option>IDR</option></select>'+
-          '<input id="oo-amt" type="text" inputmode="decimal" placeholder="金额" style="width:110px;background:var(--surface2);border:1.5px solid var(--border2);color:var(--text);padding:6px 8px;border-radius:6px;font-family:monospace">'+
+          '<input id="oo-amt" type="text" inputmode="decimal" placeholder="期初余额 SGD(正=我欠owner)" style="width:190px;background:var(--surface2);border:1.5px solid var(--border2);color:var(--text);padding:6px 8px;border-radius:6px;font-family:monospace">'+
           '<button class="btn-primary" style="font-size:12px;padding:6px 12px" onclick="ownerOpenSave(\''+safe+'\')">保存</button>'+
         '</div></div>'+
-      '<div style="text-align:right"><div style="font-size:11px;color:var(--text3)">当前余额</div>'+
-        '<div style="font-size:18px;margin-top:2px">'+_fmtBuckets(led.buckets)+'</div></div>'+
+      '<div style="text-align:right"><div style="font-size:11px;color:var(--text3)">当前余额（正=我欠owner，负=owner欠我）</div>'+
+        '<div style="font-size:18px;margin-top:2px">'+_fmtOwnerBal(led.balance)+'</div></div>'+
     '</div>'+
     // 快速录入条:一行搞定 来银/付款
     '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;background:var(--surface);border:1.5px solid var(--border2);border-radius:10px;padding:10px 12px;margin-bottom:12px">'+
       '<span onclick="_ownerPayType=\'in\';renderOwnerScreen()" style="'+CH+';'+(_ownerPayType==='in'?'background:#059669;color:#fff;border-color:#059669':'')+'">来银</span>'+
       '<span onclick="_ownerPayType=\'out\';renderOwnerScreen()" style="'+CH+';'+(_ownerPayType==='out'?'background:#ea6c1a;color:#fff;border-color:#ea6c1a':'')+'">付款</span>'+
       '<input id="op-amt" type="text" inputmode="decimal" placeholder="金额(可算式)" style="width:130px;background:var(--surface2);border:1.5px solid var(--border2);color:var(--text);padding:8px 10px;border-radius:7px;font-family:monospace" onkeydown="if(event.key===\'Enter\')ownerQuickPay(\''+safe+'\')">'+
-      ['RM','SGD','THB','IDR'].map(function(cu){ return '<span onclick="_ownerPayCur=\''+cu+'\';renderOwnerScreen()" style="'+CH+';'+(_ownerPayCur===cu?'background:var(--accent);color:#fff;border-color:var(--accent)':'')+'">'+cu+'</span>'; }).join('')+
+      ['SGD','RM','THB','IDR'].map(function(cu){ return '<span onclick="_ownerPayCur=\''+cu+'\';renderOwnerScreen()" style="'+CH+';'+(_ownerPayCur===cu?'background:var(--accent);color:#fff;border-color:var(--accent)':'')+'">'+cu+'</span>'; }).join('')+
       '<input id="op-note" type="text" placeholder="备注(可空)" style="flex:1;min-width:110px;background:var(--surface2);border:1.5px solid var(--border2);color:var(--text);padding:8px 10px;border-radius:7px" onkeydown="if(event.key===\'Enter\')ownerQuickPay(\''+safe+'\')">'+
       '<button class="btn-primary" style="font-size:13px;padding:8px 16px" onclick="ownerQuickPay(\''+safe+'\')">✓ 记录</button>'+
     '</div>'+
-    '<div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">'+
+    '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">'+
+      '<span style="font-size:11px;color:var(--text3)">日期范围</span>'+
+      '<input id="ol-range-from" type="date" value="'+(_ownerRangeFrom||'')+'" onchange="ownerRangeApply()" style="background:var(--surface2);border:1.5px solid var(--border2);color:var(--text);padding:5px 7px;border-radius:6px;font-size:12px">'+
+      '<span style="color:var(--text3);font-size:12px">至</span>'+
+      '<input id="ol-range-to" type="date" value="'+(_ownerRangeTo||'')+'" onchange="ownerRangeApply()" style="background:var(--surface2);border:1.5px solid var(--border2);color:var(--text);padding:5px 7px;border-radius:6px;font-size:12px">'+
+      ((_ownerRangeFrom||_ownerRangeTo)?'<button class="btn-secondary" style="font-size:11px;padding:4px 10px" onclick="ownerRangeClear()">清除筛选</button>':'')+
+      '<span style="flex:1"></span>'+
       '<button class="btn-secondary" style="font-size:12px;padding:6px 12px" onclick="_ownerShowAlt=!_ownerShowAlt;renderOwnerScreen()">💱 '+(_ownerShowAlt?'显示原值':'显示换算')+'</button>'+
       '<button onclick="ownerExportExcel(\''+safe+'\')" style="font-size:12px;padding:6px 12px;border-radius:8px;border:none;background:#059669;color:#fff;font-weight:700;cursor:pointer">📊 Excel</button>'+
       '<button onclick="ownerExportPDF(\''+safe+'\')" style="font-size:12px;padding:6px 12px;border-radius:8px;border:none;background:#dc2626;color:#fff;font-weight:700;cursor:pointer">📄 PDF</button>'+
@@ -10300,41 +10326,47 @@ function renderOwnerScreen(){
   var chartsByDay = {};
   try { (JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]')||[]).forEach(function(cc){ var dd=_chartDay(cc); if(dd) chartsByDay[dd]=cc; }); } catch(e){}
   function daySummaryRow(day, dayLines){
-    var t={}, pin={}, pout={};
+    var t={}, pin={}, pout={}, netSgd=0, anyPending=false;
     dayLines.forEach(function(l){
       var cu=l.cur||'SGD';
-      if(l.kind==='deal') t[cu]=(t[cu]||0)+l.amt;
-      else if(l.kind==='pay_in') pin[cu]=(pin[cu]||0)+l.amt;
-      else pout[cu]=(pout[cu]||0)+l.amt;
+      if(l.kind==='deal') t[cu]=(t[cu]||0)+l.amt; else if(l.kind==='pay_in') pin[cu]=(pin[cu]||0)+l.amt; else pout[cu]=(pout[cu]||0)+l.amt;
+      if(l.pending){ anyPending=true; return; }
+      if(l.kind==='deal') netSgd-=l.sgd; else if(l.kind==='pay_in') netSgd+=l.sgd; else netSgd-=l.sgd;
     });
     function fmtMap(m){ return Object.keys(m).map(function(k){ return _fmtCur(k,m[k]); }).join(' · '); }
     var bits=[];
     if(Object.keys(t).length) bits.push('交易 <b style="font-family:monospace">'+fmtMap(t)+'</b>');
     if(Object.keys(pin).length) bits.push('<span style="color:var(--green)">来银 '+fmtMap(pin)+'</span>');
     if(Object.keys(pout).length) bits.push('<span style="color:var(--orange)">付款 '+fmtMap(pout)+'</span>');
+    bits.push('当日SGD净变动 <b style="font-family:monospace">'+(netSgd>=0?'+':'')+Math.round(netSgd*100)/100+'</b>'+(anyPending?' <span style="color:var(--yellow)">(含待汇率)</span>':''));
+    var dayBal = dayLines.length ? dayLines[dayLines.length-1].run : null;   // 昨日结余+今日交易/来银/付款 = 当日结余(逐行滚动余额的日末值)
+    if(dayBal!=null) bits.push('当日结余 '+_fmtOwnerBal(dayBal));
     var r=(chartsByDay[day]||{}).rates||{};
     var rateBits=[];
     if(r.sgd>0) rateBits.push('SGD→RM '+r.sgd);
     if(r.sgdThb>0) rateBits.push('→THB '+r.sgdThb);
     if(r.sgdIdr>0) rateBits.push('→IDR '+r.sgdIdr);
     var rateStr = rateBits.length ? '　💱 '+rateBits.join(' · ') : '　💱 <span style="color:var(--yellow)">当日汇率未录</span>';
-    return '<tr><td colspan="5" style="padding:6px 8px;border-bottom:2px solid var(--border2);background:var(--surface2);font-size:11px;color:var(--text2)">📊 '+_dayToName(day)+' 小结：'+(bits.join('　')||'无交易')+rateStr+'</td></tr>';
+    return '<tr><td colspan="5" style="padding:10px 8px;border-bottom:2px solid var(--border2);background:var(--surface2);font-size:14px;color:var(--text2)">📊 '+_dayToName(day)+' 小结：'+(bits.join('　')||'无交易')+rateStr+'</td></tr>';
   }
   function lineRow(l){
     var kindTag = l.kind==='deal' ? '' : (l.kind==='pay_in' ? '<span style="color:var(--green);font-weight:700">来银</span> ' : '<span style="color:var(--orange);font-weight:700">付款</span> ');
     var amtCol = l.kind==='pay_in' ? 'var(--green)' : (l.kind==='pay_out' ? 'var(--orange)' : 'var(--text)');
     var sgdMark = (l.kind==='deal' && l.cur==='SGD') ? ' <span style="font-size:9px;color:var(--yellow)">新币付款</span>' : '';
+    var pendMark = l.pending ? ' <span style="font-size:9px;color:var(--yellow)">⚠️待汇率</span>' : '';
     var del = (l.kind!=='deal') ? '<button onclick="event.stopPropagation();ownerDelPayUI(\''+l.id+'\',\''+safe+'\')" style="background:none;border:none;color:var(--text3);cursor:pointer;font-size:14px">×</button>' : '';
     return '<tr>'+
       '<td style="'+TD+';white-space:nowrap;font-family:monospace">'+_dayToName(l.day)+'</td>'+
-      '<td style="'+TD+'">'+kindTag+(l.name||'')+sgdMark+'</td>'+
+      '<td style="'+TD+'">'+kindTag+(l.name||'')+sgdMark+pendMark+'</td>'+
       '<td style="'+TD+';text-align:right;font-family:monospace;font-weight:700;color:'+amtCol+';white-space:nowrap">'+((l.kind==='pay_in')?'−':'')+lineAmt(l)+'</td>'+
-      '<td style="'+TD+';text-align:right;font-family:monospace;white-space:nowrap">'+_fmtCur(l.runCur||l.cur, l.run)+'</td>'+
+      '<td style="'+TD+';text-align:right;font-family:monospace;white-space:nowrap">'+(l.pending?'<span style="color:var(--text3)">—</span>':_fmtCur('SGD', l.run))+'</td>'+
       '<td style="'+TD+';width:24px">'+del+'</td>'+
     '</tr>';
   }
+  // 日期范围筛选:只影响显示/导出的账目行,不影响顶部的真实总余额(每行的 .run 本来就是全历史累计,筛选只是隐藏部分行)
+  var dispLines = led.lines.filter(function(l){ return (!_ownerRangeFrom||l.day>=_ownerRangeFrom) && (!_ownerRangeTo||l.day<=_ownerRangeTo); });
   var byDay={}, dayOrder=[];
-  led.lines.forEach(function(l){ if(!byDay[l.day]){ byDay[l.day]=[]; dayOrder.push(l.day); } byDay[l.day].push(l); });
+  dispLines.forEach(function(l){ if(!byDay[l.day]){ byDay[l.day]=[]; dayOrder.push(l.day); } byDay[l.day].push(l); });
   dayOrder.sort().reverse();
   var rows=dayOrder.map(function(day){
     var dl=byDay[day];
@@ -10342,17 +10374,24 @@ function renderOwnerScreen(){
   }).join('');
   var TH='padding:7px 8px;font-size:11px;border-bottom:2px solid var(--border2);position:sticky;top:0;background:var(--surface2);white-space:nowrap';
   html+='<div style="overflow:auto"><table id="ol-export-table" style="width:100%;border-collapse:collapse;color:var(--text)">'+
-    '<thead><tr><th style="'+TH+';text-align:left">日期</th><th style="'+TH+';text-align:left">项目</th><th style="'+TH+';text-align:right">金额</th><th style="'+TH+';text-align:right">余额(本币种)</th><th style="'+TH+'"></th></tr></thead>'+
+    '<thead><tr><th style="'+TH+';text-align:left">日期</th><th style="'+TH+';text-align:left">项目</th><th style="'+TH+';text-align:right">金额</th><th style="'+TH+';text-align:right">余额(SGD)</th><th style="'+TH+'"></th></tr></thead>'+
     '<tbody>'+rows+'</tbody></table></div>';
-  if(!led.lines.length) html+='<div style="text-align:center;color:var(--text3);padding:14px">暂无账目（交易自 '+_dayToName(OWNER_LEDGER_START)+' 起自动计入）</div>';
+  if(!dispLines.length) html += (_ownerRangeFrom||_ownerRangeTo)
+    ? '<div style="text-align:center;color:var(--text3);padding:14px">该日期范围内暂无账目</div>'
+    : '<div style="text-align:center;color:var(--text3);padding:14px">暂无账目（交易自 '+_dayToName(OWNER_LEDGER_START)+' 起自动计入）</div>';
   main.innerHTML=html;
 }
+function ownerRangeApply(){
+  _ownerRangeFrom = (document.getElementById('ol-range-from')||{}).value || '';
+  _ownerRangeTo = (document.getElementById('ol-range-to')||{}).value || '';
+  renderOwnerScreen();
+}
+function ownerRangeClear(){ _ownerRangeFrom=''; _ownerRangeTo=''; renderOwnerScreen(); }
 function ownerOpenEditToggle(){ var d=document.getElementById('owner-open-edit'); if(d) d.style.display = d.style.display==='none' ? 'flex' : 'none'; }
 function ownerOpenSave(owner){
-  var cu=(document.getElementById('oo-cur')||{}).value||'SGD';
   var amt=_parseAmtExpr((document.getElementById('oo-amt')||{}).value);
   if(isNaN(amt)){ alert('金额无效'); return; }
-  _ownerSetOpen(owner, cu, Math.round(amt*100)/100);
+  _ownerSetOpen(owner, Math.round(amt*100)/100);
   renderOwnerScreen();
 }
 function ownerQuickPay(owner){
@@ -10373,7 +10412,7 @@ function _ownerFname(owner, ext){ return 'Owner_'+String(owner).replace(/[\/\:*?
 function ownerExportExcel(owner){
   if(typeof XLSX==='undefined'){ alert('XLSX 未加载'); return; }
   var led=_ownerLedger(owner);
-  var aoa=[['日期','项目','类型','币种','金额','换算参考','余额(本币种)']];
+  var aoa=[['日期','项目','类型','币种','金额','换算参考','余额(SGD)']];
   var chartsByDay={}; try{ (JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]')||[]).forEach(function(cc){ var dd=_chartDay(cc); if(dd) chartsByDay[dd]=cc; }); }catch(e){}
   var prevDay=null, dayT={};
   function flushDay(){
@@ -10383,14 +10422,16 @@ function ownerExportExcel(owner){
     aoa.push(['', _dayToName(prevDay)+' 小结','','', Object.keys(dayT).map(function(k){return k+' '+Math.round(dayT[k]*100)/100;}).join(' / '), rateStr, '']);
     dayT={};
   }
-  led.lines.forEach(function(l){
+  var dispLines = led.lines.filter(function(l){ return (!_ownerRangeFrom||l.day>=_ownerRangeFrom) && (!_ownerRangeTo||l.day<=_ownerRangeTo); });
+  if(_ownerRangeFrom||_ownerRangeTo) aoa.push(['','筛选范围','','',(_ownerRangeFrom?_dayToName(_ownerRangeFrom):'最早')+' ~ '+(_ownerRangeTo?_dayToName(_ownerRangeTo):'最新'),'','']);
+  dispLines.forEach(function(l){
     if(l.day!==prevDay){ flushDay(); prevDay=l.day; }
     if(l.kind==='deal') dayT[l.cur]=(dayT[l.cur]||0)+l.amt;
     aoa.push([_dayToName(l.day), l.name, l.kind==='deal'?'交易':(l.kind==='pay_in'?'来银':'付款'),
       l.cur, Math.round(l.amt*100)/100, l.alt?(l.alt.cur+' '+Math.round(l.alt.amt*100)/100):'', Math.round(l.run*100)/100]);
   });
   flushDay();
-  aoa.push(['','当前余额','','',Object.keys(led.buckets).map(function(k){return k+' '+Math.round(led.buckets[k]*100)/100;}).join(' / '),'','']);
+  aoa.push(['','当前总余额','','','SGD '+(Math.round(led.balance*100)/100),'','']);
   var wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(aoa),'Ledger');
   XLSX.writeFile(wb,_ownerFname(owner,'xlsx'));
 }
@@ -10398,12 +10439,12 @@ function ownerExportExcel(owner){
 function _ownerExportEl(owner){
   var tbl=document.getElementById('ol-export-table'); if(!tbl) return null;
   var led=_ownerLedger(owner);
-  var balTxt=Object.keys(led.buckets).filter(function(k){return Math.abs(led.buckets[k])>=0.005;})
-    .map(function(k){return _fmtCur(k,led.buckets[k]);}).join('  ·  ') || '✓ 清';
+  var balTxt = Math.abs(led.balance)>=0.005 ? _fmtCur('SGD',led.balance) : '✓ 清';
+  var rangeTxt = (_ownerRangeFrom||_ownerRangeTo) ? ('　·　范围：'+(_ownerRangeFrom?_dayToName(_ownerRangeFrom):'最早')+' ~ '+(_ownerRangeTo?_dayToName(_ownerRangeTo):'最新')) : '';
   var wrap=document.createElement('div');
   wrap.style.cssText='position:fixed;left:-10000px;top:0;width:'+Math.max(tbl.offsetWidth,640)+'px;background:'+_custHistCaptureBg()+';color:var(--text);padding:14px;font-family:IBM Plex Sans,sans-serif';
   wrap.innerHTML='<div style="font-size:18px;font-weight:800;margin-bottom:2px">💼 '+owner+'</div>'+
-    '<div style="font-size:12px;color:var(--text3);margin-bottom:10px">'+_dayToName(_dayKey())+' · 当前余额：<b style="font-family:monospace">'+balTxt+'</b></div>';
+    '<div style="font-size:12px;color:var(--text3);margin-bottom:10px">'+_dayToName(_dayKey())+' · 当前总余额：<b style="font-family:monospace">'+balTxt+'</b>'+rangeTxt+'</div>';
   wrap.appendChild(tbl.cloneNode(true));
   document.body.appendChild(wrap);
   return wrap;
