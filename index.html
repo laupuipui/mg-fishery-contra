@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260724001646 -->
+<!-- MG Fishery Contra System v20260725010235 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260724001646';  /*BUILD*/
+window.__APP_VER__ = '20260725010235';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -7524,7 +7524,7 @@ function exportPDF(printMode){
   const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260724001646 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260725010235 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
@@ -10113,7 +10113,7 @@ function batchExportExcel(){
 // 余额 = 期初 − 交易 + 来银 − 付款(2026-07-23 用户订正,取代旧的"欠我型"分币种分桶版本)。
 // 交易线是动态推导(不落盘):改表、补汇率,账本自动跟着变,零重复录入、零脱节。
 // ═══════════════════════════════════════════════════════════════════════════
-var OWNER_LEDGER_START = '2026-07-20';   // 干净起点(用户指定 20/7):该日起交易自动入账,之前一律不计
+var OWNER_LEDGER_START = '2026-07-25';   // 干净起点(用户指定 25/7):该日起交易自动入账,之前一律不计
 var OWNER_PAY_KEY  = 'mg_owner_pay';
 var OWNER_OPEN_KEY = 'mg_owner_open';
 var OWNER_V2_EPOCH = 1784736461008;      // 单一SGD余额版上线时刻:之前录的期初/来银/付款(旧分币种模型)一律不计,用户已确认无需迁移
