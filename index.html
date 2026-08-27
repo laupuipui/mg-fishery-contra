@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260725010235 -->
+<!-- MG Fishery Contra System v20260827155851 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260725010235';  /*BUILD*/
+window.__APP_VER__ = '20260827155851';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -6039,24 +6039,31 @@ function _cdEnforceFreshCarries(){
     });
     // DUPLICATE-CARRY COLLAPSE — two devices auto-carrying near-simultaneously each create their
     // own copy (different _id) of the SAME source; the union merge keeps both. Group today's
-    // carried rows by source identity and keep ONE deterministically (a worked-on copy wins;
-    // otherwise the smallest _id — same rule on every device → all devices converge to the same
-    // survivor). The stripped copies are tombstoned so they can't sync back.
+    // carried rows by source identity and keep ONE deterministically (a MERGED copy always wins —
+    // it represents a real transaction someone entered, never delete it; otherwise a worked-on
+    // copy wins; otherwise the smallest _id — same rule on every device → all devices converge to
+    // the same survivor). The stripped copies are tombstoned so they can't sync back.
+    // NOTE: a merged row clears isCD (MERGE-3, so it renders as a normal live row) but KEEPS
+    // cdSource — it must still be scanned here, otherwise its still-isCD, not-yet-merged sibling
+    // from another device (same cdSource, carried in independently) is never recognized as a
+    // duplicate and survives forever alongside the merged row ("today's transaction shows twice").
     var groups = {};
     entries.forEach(function(e){
-      if(!e || !e.isCD || e.cdManual) return;
-      var key = (e.cdSource && e.cdSource.id) ? ('sid:'+e.cdSource.id)
-              : (e.cdSource && e.cdSource.srcKey) ? (e.cdSource.srcKey+'@'+(e.cdSource.srcDay||''))
+      if(!e || e.cdManual || !e.cdSource) return;
+      if(!(e.isCD || e.cdMerged)) return;
+      var key = (e.cdSource.id) ? ('sid:'+e.cdSource.id)
+              : (e.cdSource.srcKey) ? (e.cdSource.srcKey+'@'+(e.cdSource.srcDay||''))
               : (_cdCustAmtKey(e)+'@'+_cdRowSrcDay(e));
       (groups[key]=groups[key]||[]).push(e);
     });
     Object.keys(groups).forEach(function(k){
       var g = groups[k];
       if(g.length < 2) return;
+      var mergedOnes = g.filter(function(e){ return e.cdMerged; });
       var worked = g.filter(function(e){ return allocOf(e)!==0; });
-      var keeper = worked.length ? worked.sort(function(a,b){ return String(a._id)<String(b._id)?-1:1; })[0]
-                                 : g.slice().sort(function(a,b){ return String(a._id)<String(b._id)?-1:1; })[0];
-      g.forEach(function(e){ if(e!==keeper && allocOf(e)===0 && stale.indexOf(e)<0) stale.push(e); });
+      var pool = mergedOnes.length ? mergedOnes : (worked.length ? worked : g);
+      var keeper = pool.slice().sort(function(a,b){ return String(a._id)<String(b._id)?-1:1; })[0];
+      g.forEach(function(e){ if(e!==keeper && !e.cdMerged && allocOf(e)===0 && stale.indexOf(e)<0) stale.push(e); });
     });
     if(!stale.length) return;
     var ids = stale.map(function(e){ return e._id; }).filter(Boolean);
@@ -6103,7 +6110,6 @@ function _cdEnforceDismissals(){
 // tombstoned, the chart-merge strips them before they reach the live set. No-op when none exist.
 function _cdRemoveSelfCarryV1(){
   try{
-    if(_dayKey() > '2026-07-25') return;   // transition-period cleanup only (root cause already fixed)
     if(!Array.isArray(entries)) return;
     if(currentChartName && (_cdNameDayKey(currentChartName)||_dayKey()) !== _dayKey()) return;   // only while on today (parsed day)
     var now=new Date(), td=now.getDate(), tm=now.getMonth()+1;
@@ -7524,7 +7530,7 @@ function exportPDF(printMode){
   const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260725010235 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260827155851 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
