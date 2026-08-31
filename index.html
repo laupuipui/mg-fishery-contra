@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260827155851 -->
+<!-- MG Fishery Contra System v20260831170419 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260827155851';  /*BUILD*/
+window.__APP_VER__ = '20260831170419';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -7530,7 +7530,7 @@ function exportPDF(printMode){
   const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260827155851 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260831170419 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
@@ -9387,10 +9387,13 @@ function runCustomPrint(){
   generateCustomPrint(cols, selBanks, parseFloat(fontSize));
 }
 
-function generateCustomPrint(cols, selBanks, fontSize){
+// srcEntries/dateLabel 可选:不传就沿用旧行为(打印今天实时 entries + 当前日期时间)。
+// 传了就打印指定来源(如某天历史表),标题只显示那天的日期(不是"现在")。
+function generateCustomPrint(cols, selBanks, fontSize, srcEntries, dateLabel){
+  var srcE = srcEntries || entries;
   var now = new Date();
-  var ds = now.getDate()+'/'+(now.getMonth()+1)+'/'+now.getFullYear();
-  var timeStr = now.toLocaleTimeString('en-MY',{hour:'2-digit',minute:'2-digit'});
+  var ds = dateLabel || (now.getDate()+'/'+(now.getMonth()+1)+'/'+now.getFullYear());
+  var timeStr = dateLabel ? '' : now.toLocaleTimeString('en-MY',{hour:'2-digit',minute:'2-digit'});
 
   // Build column definitions
   var colDefs = [];
@@ -9422,7 +9425,7 @@ function generateCustomPrint(cols, selBanks, fontSize){
   var currentPage = [];
 
   selBanks.forEach(function(grp){
-    var ge = entries.filter(function(e){ return e.group===grp && !e.hidden; });
+    var ge = srcE.filter(function(e){ return e.group===grp && !e.hidden; });
     if(!ge.length) return;
     var grpMM = grpHeaderMM + ge.length * rowHeightMM + totalMM + 4; // +4 spacing
 
@@ -9519,7 +9522,7 @@ function generateCustomPrint(cols, selBanks, fontSize){
     return '<div class="page">'+
       '<div class="page-header">'+
         '<span class="page-title">CONTRA SYSTEM</span>'+
-        '<span class="page-date">'+ds+' '+timeStr+'</span>'+
+        '<span class="page-date">'+ds+(timeStr?(' '+timeStr):'')+'</span>'+
         '<span class="page-num">第 '+pageNum+' 页 / 共 '+totalPages+' 页</span>'+
       '</div>'+
       '<table><colgroup>'+
@@ -10844,7 +10847,7 @@ function renderHistoryList(charts){
         })() +
       '</div>' +
       '<button class="tb-btn teal" onclick="viewChartReadonly(\''+cid+'\')">📖 '+(isEng?'View':'查看')+'</button>' +
-      '<button class="tb-btn" onclick="viewChartCustomers(\''+cid+'\')" style="color:var(--pbb);border-color:rgba(168,127,255,.3)" title="客户历史">👤</button>' +
+      '<button class="tb-btn" onclick="event.stopPropagation();printChartOneClick(\''+cid+'\')" style="color:var(--pbb);border-color:rgba(168,127,255,.3)" title="一键打印当天记录">🖨️</button>' +
       '<button class="tb-btn red" onclick="deleteChart(\''+cid+'\')">'+t('history_delete')+'</button>' +
     '</div>';
   }).join('');
@@ -10853,6 +10856,18 @@ function renderHistoryList(charts){
 // ======================================================
 // FEATURE: CUSTOMER TRANSACTION HISTORY
 // ======================================================
+// 历史列表「🖨️」一键打印:直接生成那一天的打印版(全列+当天出现过的银行组),不弹选项框
+function printChartOneClick(cid){
+  var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
+  var c = charts.find(function(x){ return String(x.id)===String(cid); });
+  if(!c || !Array.isArray(c.entries)){ alert('找不到这天的记录'); return; }
+  var cols = {no:true,name:true,bank:true,acct:true,amt:true,act:true,yes:true,hs:true,cash:true,owner:true,bal:true};
+  var selBanks = BANK_GROUPS.filter(function(grp){ return c.entries.some(function(e){ return e && e.group===grp && !e.hidden; }); });
+  if(!selBanks.length){ alert('这天没有可打印的记录'); return; }
+  var dayKey = (typeof _chartDay==='function') ? _chartDay(c) : null;
+  var dateLabel = dayKey ? _dayToName(dayKey) : (c.name||'');
+  generateCustomPrint(cols, selBanks, 9, c.entries, dateLabel);
+}
 function viewChartCustomers(id){
   // Show all customers in a specific chart — look up by stable id (not index).
   var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
