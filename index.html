@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260831170419 -->
+<!-- MG Fishery Contra System v20260831171353 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260831170419';  /*BUILD*/
+window.__APP_VER__ = '20260831171353';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -7476,10 +7476,14 @@ function doFullExport(type){
   exportPDF(type==='pdf_print');
 }
 
-function exportPDF(printMode){
+// srcEntries/dateLabel 可选:不传就沿用旧行为(打印/导出当前实时 entries,支持批量出图);
+// 传了(如某天历史表)就直接用那份数据 + 那天的日期,跳过批量逻辑。
+function exportPDF(printMode, srcEntries, dateLabel){
+  var explicitSrc = !!srcEntries;
   // Use state object for batch detection and YES section
   var _state = _currentExportState || { isBatch: false, section: 'all', person: '' };
-  var _isBatchPDF = _state.isBatch || /批量|batch/i.test(document.getElementById('export-modal-title').textContent || '');
+  var _titleEl = document.getElementById('export-modal-title');
+  var _isBatchPDF = !explicitSrc && (_state.isBatch || /批量|batch/i.test((_titleEl && _titleEl.textContent) || ''));
   var _pdfYesSection = _state.section || 'all';
   var _pdfPerson = _state.person || '';
   var _pdfIsYES = _pdfPerson === 'YES';
@@ -7489,10 +7493,11 @@ function exportPDF(printMode){
     entries = _batchExportCache.slice();
   }
   try {
+  var srcE = srcEntries || entries;
   // Use chart's name (date) when available, fall back to today's date
   const now=new Date();
   const todayDs = `${now.getDate()}/${now.getMonth()+1}/${now.getFullYear()}`;
-  const ds = (typeof currentChartName === 'string' && currentChartName.trim()) ? currentChartName.trim() : todayDs;
+  const ds = dateLabel || ((typeof currentChartName === 'string' && currentChartName.trim()) ? currentChartName.trim() : todayDs);
   let rows='';
   BANK_GROUPS.forEach(grp=>{
     // YES section filter
@@ -7500,10 +7505,10 @@ function exportPDF(printMode){
       if(_pdfYesSection === 'rm' && grp === 'RP') return;
       if(_pdfYesSection === 'rp' && grp !== 'RP') return;
     }
-    const ge=entries.filter(e=>e.group===grp&&!e.hidden);
+    const ge=srcE.filter(e=>e.group===grp&&!e.hidden);
     if(!ge.length) return;
     const isRP=grp==='RP'; const isTHB=grp==='THB';
-    const amtH=isRP?(entries.find(e=>e.group==='RP')?.currency||'IDR'):isTHB?'THB':'RM';
+    const amtH=isRP?(srcE.find(e=>e.group==='RP')?.currency||'IDR'):isTHB?'THB':'RM';
     rows+=`<tr class="gh"><td colspan="${printMode?9:11}">${grp}</td></tr>`;
     rows+=`<tr class="ch"><td>No</td><td>Name</td><td>Bank</td><td>A/C No</td><td>${amtH}</td><td>${isRP?'BT HENG':'ACT'}</td><td>YES</td><td>HS</td><td>CASH</td>${!printMode?'<td>Owner</td><td>Balance</td>':''}</tr>`;
     let no=1,gt=0;
@@ -7527,10 +7532,10 @@ function exportPDF(printMode){
     rows+=`<tr class="tr"><td colspan="4">${grp} TOTAL</td><td class="r">${totDisplay}</td><td colspan="${printMode?4:6}"></td></tr>
            <tr><td colspan="${printMode?9:11}" style="height:6px"></td></tr>`;
   });
-  const gRM=entries.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
+  const gRM=srcE.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260831170419 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260831171353 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
@@ -10856,17 +10861,16 @@ function renderHistoryList(charts){
 // ======================================================
 // FEATURE: CUSTOMER TRANSACTION HISTORY
 // ======================================================
-// 历史列表「🖨️」一键打印:直接生成那一天的打印版(全列+当天出现过的银行组),不弹选项框
+// 历史列表「🖨️」一键打印:直接出那一天的「打印版」(exportPDF printMode=true,无 Owner/Balance 列,
+// 与主界面"完整导出→🖨 打印版"同一个精简格式——不是"打印版（自定义）"那个选列/选字号的版本),不弹选项框
 function printChartOneClick(cid){
   var charts = JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]');
   var c = charts.find(function(x){ return String(x.id)===String(cid); });
   if(!c || !Array.isArray(c.entries)){ alert('找不到这天的记录'); return; }
-  var cols = {no:true,name:true,bank:true,acct:true,amt:true,act:true,yes:true,hs:true,cash:true,owner:true,bal:true};
-  var selBanks = BANK_GROUPS.filter(function(grp){ return c.entries.some(function(e){ return e && e.group===grp && !e.hidden; }); });
-  if(!selBanks.length){ alert('这天没有可打印的记录'); return; }
+  if(!c.entries.some(function(e){ return e && !e.hidden; })){ alert('这天没有可打印的记录'); return; }
   var dayKey = (typeof _chartDay==='function') ? _chartDay(c) : null;
   var dateLabel = dayKey ? _dayToName(dayKey) : (c.name||'');
-  generateCustomPrint(cols, selBanks, 9, c.entries, dateLabel);
+  exportPDF(true, c.entries, dateLabel);
 }
 function viewChartCustomers(id){
   // Show all customers in a specific chart — look up by stable id (not index).
