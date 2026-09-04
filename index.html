@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260831171353 -->
+<!-- MG Fishery Contra System v20260904163109 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260831171353';  /*BUILD*/
+window.__APP_VER__ = '20260904163109';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -42,6 +42,8 @@ window.__APP_VER__ = '20260831171353';  /*BUILD*/
   --amb:#f472b6; --thb:#22d3ee; --rp:#fb923c; --ocbc:#a3e635;
   --cd-bg:rgba(255,61,82,.10); --unalloc-bg:rgba(255,61,82,.15);
   --alloc-box:#2e3a48; --row-alt:rgba(255,255,255,.025);
+  /* 统计图表专用系列色(dataviz skill 校验通过的分类色板,all-pairs 3槽 + 1个中性灰给SGD"待换算") */
+  --viz-rm:#3987e5; --viz-idr:#d95926; --viz-thb:#199e70; --viz-sgd:#898781;
 }
 body.light {
   --bg:#e8ecf0; --surface:#ffffff; --surface2:#f0f3f7;
@@ -49,6 +51,7 @@ body.light {
   --text:#0f1923; --text2:#3a5068; --text3:#7a90a8;
   --accent:#006fa0; --accent2:#004e72;
   --green:#007a48; --yellow:#7a5a00; --red:#b8001e; --orange:#9a3e00;
+  --viz-rm:#2a78d6; --viz-idr:#eb6834; --viz-thb:#1baf7a; --viz-sgd:#898781;
   --cd-bg:rgba(184,0,30,.07); --unalloc-bg:rgba(184,0,30,.12);
   --alloc-box:#c8d4e0; --row-alt:rgba(0,0,0,.03);
 }
@@ -951,6 +954,10 @@ body.fs-lg .alloc-input{font-size:14px}
     <span class="si-ico">📈</span>
     <span class="si-lbl">统计报告<span class="si-sub">按日期范围统计</span></span>
   </button>
+  <button class="sidebar-item" onclick="openStatsCharts();closeSidebar()">
+    <span class="si-ico">📉</span>
+    <span class="si-lbl">统计图表<span class="si-sub">汇率/交易额波动、币种占比</span></span>
+  </button>
   <button class="sidebar-item" onclick="openRatesHistory();closeSidebar()">
     <span class="si-ico">💱</span>
     <span class="si-lbl">汇率历史<span class="si-sub">查看过往每日汇率</span></span>
@@ -1238,6 +1245,22 @@ body.fs-lg .alloc-input{font-size:14px}
     <div id="owner-side" style="width:230px;flex-shrink:0;border-right:1.5px solid var(--border);padding:10px;overflow-y:auto"></div>
     <div id="owner-main" style="flex:1;padding:14px 18px;overflow:auto;min-width:0"></div>
   </div>
+</div>
+<!-- ═══ 统计图表 独立界面(全屏,非浮窗) ═══ -->
+<div id="stats-charts-screen" style="display:none;position:fixed;inset:0;z-index:8000;background:var(--bg);overflow:auto">
+  <div style="position:sticky;top:0;z-index:10;background:var(--surface);border-bottom:1.5px solid var(--border2);padding:10px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <button class="btn-secondary" onclick="closeStatsCharts()" style="font-size:13px;padding:7px 14px">← 返回记账</button>
+    <span style="font-weight:800;font-size:16px">📉 统计图表</span>
+    <span style="font-size:11px;color:var(--text3)">汇率波动 · 每日交易额波动 · 币种占比</span>
+    <span style="flex:1"></span>
+    <span style="font-size:11px;color:var(--text3)">日期范围</span>
+    <input id="sc-range-from" type="date" onchange="scRangeApply()" style="background:var(--surface2);border:1.5px solid var(--border2);color:var(--text);padding:5px 7px;border-radius:6px;font-size:12px">
+    <span style="color:var(--text3);font-size:12px">至</span>
+    <input id="sc-range-to" type="date" onchange="scRangeApply()" style="background:var(--surface2);border:1.5px solid var(--border2);color:var(--text);padding:5px 7px;border-radius:6px;font-size:12px">
+    <button id="sc-range-clear-btn" class="btn-secondary" style="font-size:11px;padding:4px 10px;display:none" onclick="scRangeClear()">清除筛选</button>
+    <button onclick="scExportImage()" style="font-size:12px;padding:6px 12px;border-radius:8px;border:none;background:#7c3aed;color:#fff;font-weight:700;cursor:pointer">🖼 导出图片</button>
+  </div>
+  <div id="sc-body" style="padding:16px"></div>
 </div>
 <!-- XLSX -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -7535,7 +7558,7 @@ function exportPDF(printMode, srcEntries, dateLabel){
   const gRM=srcE.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260831171353 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260904163109 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
@@ -10482,6 +10505,229 @@ function ownerExportPDF(owner){
     pdf.addImage(cv.toDataURL('image/png'),'PNG',20,20,pw,ih);
     pdf.save(_ownerFname(owner,'pdf'));
   }).catch(function(e){ el.remove(); alert('导出PDF失败：'+e); });
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 统计图表(2026-08-31 新增):汇率波动 / 每日交易额波动 / 币种交易笔数占比。
+// 纯手写内联 SVG,零外部依赖(与本系统离线优先的哲学一致,不接 Chart.js 等库)。
+// 配色经 dataviz skill 的校验脚本过关:blue/orange/aqua(--viz-rm/idr/thb)是
+// palette.md 里 all-pairs 三槽验证通过的分类色,按语义对应本系统既有 THB=青系/
+// IDR(RP)=橙系的联想分配;SGD 是"待换算"的过渡状态,用中性灰(--viz-sgd)而不占
+// 第4个分类槽位——4色 all-pairs 跑过校验脚本是 FAIL 的(见 palette.md 的说明)。
+// ══════════════════════════════════════════════════════════════════════════
+var _scRangeFrom = '';
+var _scRangeTo = '';
+function _scDefaultRange(){
+  if(!_scRangeFrom) _scRangeFrom = _dayKey(new Date(Date.now()-29*86400000));
+  if(!_scRangeTo)   _scRangeTo   = _dayKey();
+}
+function openStatsCharts(){
+  _scDefaultRange();
+  renderStatsCharts();
+  document.getElementById('stats-charts-screen').style.display='block';
+}
+function closeStatsCharts(){ document.getElementById('stats-charts-screen').style.display='none'; }
+function scRangeApply(){
+  _scRangeFrom = (document.getElementById('sc-range-from')||{}).value || '';
+  _scRangeTo   = (document.getElementById('sc-range-to')||{}).value || '';
+  renderStatsCharts();
+}
+function scRangeClear(){ _scRangeFrom=''; _scRangeTo=''; _scDefaultRange(); renderStatsCharts(); }
+
+// 范围内的权威日表(day 升序)——复用 CD 逻辑同一套"每天一张权威表"去重(_cdCanonicalCharts),
+// 避免同日重复/恢复副本把交易笔数、金额算重。
+function _scChartsInRange(){
+  var out=[];
+  try{
+    _cdCanonicalCharts().forEach(function(c){
+      var d=_chartDay(c);
+      if(!d) return;
+      if(_scRangeFrom && d<_scRangeFrom) return;
+      if(_scRangeTo && d>_scRangeTo) return;
+      out.push(c);
+    });
+  }catch(e){}
+  out.sort(function(a,b){ var da=_chartDay(a), db=_chartDay(b); return da<db?-1:da>db?1:0; });
+  return out;
+}
+// 币种判定与全系统其它统计(runStats/_ownerRowVal)同一套规则——绝不跨币种相加
+function _scEntryCur(e){
+  if(!e) return null;
+  if(e.currency==='SGD') return 'SGD';
+  if(e.group==='RP') return 'IDR';
+  if(e.group==='THB') return 'THB';
+  return 'RM';
+}
+function _scEntryAmt(e, cur){ return cur==='RM' ? (e.rmAmount||0) : (e.amount||0); }
+
+// 汇率序列:{RM:[{x:day,y:rate}], THB:[...], IDR:[...]}——只收有录汇率的那天,不补0连出假波动
+function _scRateSeries(){
+  var s={RM:[],THB:[],IDR:[]};
+  _scChartsInRange().forEach(function(c){
+    var d=_chartDay(c), r=c.rates||{};
+    if(r.sgd>0)    s.RM.push({x:d,y:r.sgd});
+    if(r.sgdThb>0) s.THB.push({x:d,y:r.sgdThb});
+    if(r.sgdIdr>0) s.IDR.push({x:d,y:r.sgdIdr});
+  });
+  return s;
+}
+// 每日交易额序列:{RM:[...],THB:[...],IDR:[...],SGD:[...]}——只收当天真的有该币种交易的天,
+// 不画成固定日历日的平线(没开表/没这个币种的日子不是"0",是"没发生")
+function _scDailyAmountSeries(){
+  var byDay={};
+  _scChartsInRange().forEach(function(c){
+    var d=_chartDay(c);
+    (c.entries||[]).forEach(function(e){
+      if(!e || e.hidden) return;
+      var cur=_scEntryCur(e), amt=_scEntryAmt(e,cur);
+      if(!amt) return;
+      if(!byDay[d]) byDay[d]={RM:0,THB:0,IDR:0,SGD:0};
+      byDay[d][cur]+=amt;
+    });
+  });
+  var days=Object.keys(byDay).sort();
+  var s={RM:[],THB:[],IDR:[],SGD:[]};
+  days.forEach(function(d){
+    ['RM','THB','IDR','SGD'].forEach(function(cur){ if(byDay[d][cur]) s[cur].push({x:d,y:byDay[d][cur]}); });
+  });
+  return s;
+}
+// 币种交易笔数(不是金额——不同币种金额不能直接相加,笔数才是唯一能公平比占比的口径)
+function _scCurCounts(){
+  var c0={RM:0,THB:0,IDR:0,SGD:0};
+  _scChartsInRange().forEach(function(c){
+    (c.entries||[]).forEach(function(e){ if(e && !e.hidden) c0[_scEntryCur(e)]++; });
+  });
+  return c0;
+}
+
+// 手写折线小图(sparkline 风格):2px线、圆头圆角连接、末点大圆点+末值直接标注、
+// 上下两条 hairline 网格、每点原生 <title> 提供 hover 数值(零JS事件绑定成本)。
+function _sparkLine(points, opts){
+  opts = opts||{};
+  var w=opts.w||270, h=opts.h||108;
+  var padL=6, padR=10, padT=12, padB=16;
+  var color = opts.color || 'var(--accent)';
+  var fmt = opts.fmt || function(v){ return fmtN(v); };
+  if(!points || !points.length){
+    return '<svg width="'+w+'" height="'+h+'" style="display:block;max-width:100%"><text x="'+(w/2)+'" y="'+(h/2)+'" text-anchor="middle" font-size="11" fill="var(--text3)">该范围无数据</text></svg>';
+  }
+  var ys = points.map(function(p){ return p.y; });
+  var minY = Math.min.apply(null, ys), maxY = Math.max.apply(null, ys);
+  if(minY===maxY){ var pad=(Math.abs(minY)*0.08)||1; minY-=pad; maxY+=pad; }
+  var innerW=w-padL-padR, innerH=h-padT-padB, n=points.length;
+  function px(i){ return padL + (n<=1 ? innerW/2 : innerW*i/(n-1)); }
+  function py(v){ return padT + innerH*(1-(v-minY)/(maxY-minY)); }
+  var d = points.map(function(p,i){ return (i===0?'M':'L')+px(i).toFixed(1)+','+py(p.y).toFixed(1); }).join(' ');
+  var grid = '<line x1="'+padL+'" y1="'+padT+'" x2="'+(w-padR)+'" y2="'+padT+'" stroke="var(--border)" stroke-width="1"/>'+
+             '<line x1="'+padL+'" y1="'+(h-padB)+'" x2="'+(w-padR)+'" y2="'+(h-padB)+'" stroke="var(--border)" stroke-width="1"/>';
+  var dots = points.map(function(p,i){
+    var isLast = i===n-1, r = isLast?4:2.5;
+    return '<circle cx="'+px(i).toFixed(1)+'" cy="'+py(p.y).toFixed(1)+'" r="'+r+'" fill="'+color+'" stroke="var(--surface2)" stroke-width="2"><title>'+_dayToName(p.x)+': '+fmt(p.y)+'</title></circle>';
+  }).join('');
+  var last = points[n-1];
+  var endLabel = '<text x="'+px(n-1).toFixed(1)+'" y="'+(py(last.y)-8).toFixed(1)+'" text-anchor="end" font-size="11" font-weight="700" fill="var(--text)">'+fmt(last.y)+'</text>';
+  var axisLabel = '<text x="'+padL+'" y="'+(padT-3)+'" font-size="9" fill="var(--text3)">'+fmt(maxY)+'</text>'+
+                   '<text x="'+padL+'" y="'+(h-padB+12)+'" font-size="9" fill="var(--text3)">'+fmt(minY)+'</text>';
+  return '<svg width="'+w+'" height="'+h+'" viewBox="0 0 '+w+' '+h+'" style="display:block;max-width:100%">'+grid+
+    '<path d="'+d+'" fill="none" stroke="'+color+'" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>'+
+    dots+endLabel+axisLabel+'</svg>';
+}
+// 手写饼图:百分比>=6%的切片才塞文字(避免小切片文字溢出),每片原生 <title> 补全信息
+function _sparkPie(slices, opts){
+  opts = opts||{};
+  var size = opts.size||160, r=size/2-4, cx=size/2, cy=size/2;
+  var total = slices.reduce(function(s,x){ return s+(x.value||0); },0);
+  if(!total) return '<svg width="'+size+'" height="'+size+'"><text x="'+cx+'" y="'+cy+'" text-anchor="middle" font-size="11" fill="var(--text3)">无数据</text></svg>';
+  var ang=-Math.PI/2, paths='';
+  slices.forEach(function(s){
+    if(!s.value) return;
+    var frac=s.value/total, a2=ang+frac*Math.PI*2;
+    var x1=cx+r*Math.cos(ang), y1=cy+r*Math.sin(ang);
+    var x2=cx+r*Math.cos(a2), y2=cy+r*Math.sin(a2);
+    var large=(a2-ang)>Math.PI?1:0;
+    var mid=ang+(a2-ang)/2, lx=cx+(r*0.66)*Math.cos(mid), ly=cy+(r*0.66)*Math.sin(mid);
+    var pct=Math.round(frac*100);
+    paths += '<path d="M'+cx+','+cy+' L'+x1.toFixed(2)+','+y1.toFixed(2)+' A'+r+','+r+' 0 '+large+' 1 '+x2.toFixed(2)+','+y2.toFixed(2)+' Z" fill="'+s.color+'" stroke="var(--surface2)" stroke-width="2"><title>'+s.label+': '+s.value+' 笔 ('+pct+'%)</title></path>';
+    if(frac>=0.06) paths += '<text x="'+lx.toFixed(1)+'" y="'+ly.toFixed(1)+'" text-anchor="middle" font-size="10" font-weight="700" fill="#fff">'+pct+'%</text>';
+    ang=a2;
+  });
+  return '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'">'+paths+'</svg>';
+}
+function _scLegendRow(label, color, valueText){
+  return '<div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text2)">'+
+    '<span style="display:inline-block;width:10px;height:10px;border-radius:2px;background:'+color+';flex-shrink:0"></span>'+
+    '<span>'+label+'</span><span style="margin-left:auto;font-family:monospace;color:var(--text)">'+valueText+'</span></div>';
+}
+function renderStatsCharts(){
+  var body=document.getElementById('sc-body'); if(!body) return;
+  var fromEl=document.getElementById('sc-range-from'), toEl=document.getElementById('sc-range-to');
+  if(fromEl) fromEl.value=_scRangeFrom; if(toEl) toEl.value=_scRangeTo;
+  var clearBtn=document.getElementById('sc-range-clear-btn'); if(clearBtn) clearBtn.style.display=(_scRangeFrom||_scRangeTo)?'':'none';
+
+  var rates=_scRateSeries(), amts=_scDailyAmountSeries(), counts=_scCurCounts();
+
+  var RATE_DEFS=[
+    {key:'RM', title:'SGD → RM',  color:'var(--viz-rm)',  fmt:function(v){return v.toFixed(4);}},
+    {key:'THB',title:'SGD → THB', color:'var(--viz-thb)', fmt:function(v){return v.toFixed(2);}},
+    {key:'IDR',title:'SGD → IDR', color:'var(--viz-idr)', fmt:function(v){return Math.round(v).toLocaleString();}}
+  ];
+  var AMT_DEFS=[
+    {key:'RM', title:'RM 每日交易额',       color:'var(--viz-rm)',  fmt:function(v){return fmtN(v);}},
+    {key:'THB',title:'THB 每日交易额',      color:'var(--viz-thb)', fmt:function(v){return fmtN(v);}},
+    {key:'IDR',title:'IDR 每日交易额',      color:'var(--viz-idr)', fmt:function(v){return Math.round(v).toLocaleString();}},
+    {key:'SGD',title:'SGD(待换算)每日交易额',color:'var(--viz-sgd)', fmt:function(v){return fmtN(v);}}
+  ];
+  function grid(defs, series){
+    var cards = defs.filter(function(d){ return series[d.key] && series[d.key].length; }).map(function(d){
+      return '<div style="background:var(--surface2);border:1.5px solid var(--border);border-radius:10px;padding:10px 12px">'+
+        '<div style="font-size:12px;font-weight:700;color:var(--text2);margin-bottom:6px">'+d.title+'</div>'+
+        _sparkLine(series[d.key], {color:d.color, fmt:d.fmt}) + '</div>';
+    });
+    if(!cards.length) return '<div style="color:var(--text3);font-size:12px;padding:10px 0">该范围内无数据</div>';
+    return '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px">'+cards.join('')+'</div>';
+  }
+
+  var totalCount = counts.RM+counts.THB+counts.IDR+counts.SGD;
+  var pieSlices=[
+    {label:'RM', value:counts.RM, color:'var(--viz-rm)'},
+    {label:'IDR',value:counts.IDR,color:'var(--viz-idr)'},
+    {label:'THB',value:counts.THB,color:'var(--viz-thb)'},
+    {label:'SGD',value:counts.SGD,color:'var(--viz-sgd)'}
+  ];
+  var legend = pieSlices.map(function(s){
+    var pct = totalCount ? Math.round(s.value/totalCount*100) : 0;
+    return _scLegendRow(s.label, s.color, s.value+' 笔 · '+pct+'%');
+  }).join('');
+
+  body.innerHTML =
+    '<div id="sc-sec-rate" style="margin-bottom:22px"><div style="font-size:14px;font-weight:800;margin-bottom:10px">💱 汇率波动</div>'+grid(RATE_DEFS, rates)+'</div>'+
+    '<div id="sc-sec-amt" style="margin-bottom:22px"><div style="font-size:14px;font-weight:800;margin-bottom:10px">📊 每日交易额波动</div>'+grid(AMT_DEFS, amts)+'</div>'+
+    '<div id="sc-sec-pie"><div style="font-size:14px;font-weight:800;margin-bottom:10px">🥧 币种交易笔数占比</div>'+
+      (totalCount ?
+        '<div style="display:flex;gap:20px;align-items:center;flex-wrap:wrap;background:var(--surface2);border:1.5px solid var(--border);border-radius:10px;padding:14px">'+
+          _sparkPie(pieSlices,{size:160})+'<div style="display:flex;flex-direction:column;gap:6px;min-width:140px">'+legend+'</div></div>'
+        : '<div style="color:var(--text3);font-size:12px">该范围内无数据</div>')+
+    '</div>';
+}
+// 导出图片:离屏包装(标题+范围)+ 当前渲染的图表区,截出来的图自带身份信息(仿 _ownerExportEl 模式)
+function scExportImage(){
+  if(typeof html2canvas==='undefined'){ alert('图片库还在加载，请几秒后再试'); return; }
+  var body=document.getElementById('sc-body'); if(!body || !body.innerHTML){ alert('先打开统计图表'); return; }
+  var rangeTxt = (_scRangeFrom||_scRangeTo) ? ((_scRangeFrom?_dayToName(_scRangeFrom):'最早')+' ~ '+(_scRangeTo?_dayToName(_scRangeTo):'最新')) : '全部历史';
+  var wrap=document.createElement('div');
+  wrap.style.cssText='position:fixed;left:-10000px;top:0;width:'+Math.max(body.offsetWidth,900)+'px;background:'+_custHistCaptureBg()+';color:var(--text);padding:16px;font-family:IBM Plex Sans,sans-serif';
+  wrap.innerHTML='<div style="font-size:18px;font-weight:800;margin-bottom:2px">📉 统计图表</div>'+
+    '<div style="font-size:12px;color:var(--text3);margin-bottom:12px">范围：'+rangeTxt+'</div>';
+  wrap.appendChild(body.cloneNode(true));
+  document.body.appendChild(wrap);
+  html2canvas(wrap,{backgroundColor:_custHistCaptureBg(),scale:2}).then(function(cv){
+    wrap.remove();
+    var a=document.createElement('a');
+    a.download='统计图表_'+_dayToName(_dayKey()).replace(/\//g,'-')+'.jpg';
+    a.href=cv.toDataURL('image/jpeg',0.95);
+    a.click();
+  }).catch(function(e){ wrap.remove(); alert('导出图片失败：'+e); });
 }
 
 // ═══ L2 行级审计:这一行的完整履历(时间·设备·来源·操作),数据来自意图台账。═══
