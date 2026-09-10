@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260910123919 -->
+<!-- MG Fishery Contra System v20260910225007 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260910123919';  /*BUILD*/
+window.__APP_VER__ = '20260910225007';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -958,6 +958,10 @@ body.fs-lg .alloc-input{font-size:14px}
     <span class="si-ico">📉</span>
     <span class="si-lbl">统计图表<span class="si-sub">汇率/交易额波动、币种占比</span></span>
   </button>
+  <button class="sidebar-item" onclick="openFxRates();closeSidebar()">
+    <span class="si-ico">🌐</span>
+    <span class="si-lbl">外汇行情<span class="si-sub">市场参考中间价，每日更新</span></span>
+  </button>
   <button class="sidebar-item" onclick="openRatesHistory();closeSidebar()">
     <span class="si-ico">💱</span>
     <span class="si-lbl">汇率历史<span class="si-sub">查看过往每日汇率</span></span>
@@ -1262,6 +1266,18 @@ body.fs-lg .alloc-input{font-size:14px}
   </div>
   <div id="sc-body" style="padding:16px"></div>
   <div id="sc-tooltip" style="display:none;position:fixed;z-index:20;pointer-events:none;background:var(--surface2);border:1px solid var(--border2);border-radius:10px;padding:6px 10px;font-size:12px;color:var(--text);box-shadow:0 4px 14px rgba(0,0,0,.25);white-space:nowrap"></div>
+</div>
+<!-- ═══ 外汇行情 独立界面(全屏,非浮窗)。数据来自免密钥的公开 API,仅供参考,不写入记账汇率 ═══ -->
+<div id="fx-screen" style="display:none;position:fixed;inset:0;z-index:8000;background:var(--bg);overflow:auto">
+  <div style="position:sticky;top:0;z-index:10;background:var(--surface);border-bottom:1.5px solid var(--border2);padding:10px 16px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <button class="btn-secondary" onclick="closeFxScreen()" style="font-size:13px;padding:7px 14px">← 返回记账</button>
+    <span style="font-weight:800;font-size:16px">🌐 外汇行情</span>
+    <span id="fx-updated" style="font-size:11px;color:var(--text3)"></span>
+    <span style="flex:1"></span>
+    <button onclick="fxRefresh(true)" style="font-size:12px;padding:6px 14px;border-radius:8px;border:none;background:var(--accent);color:#fff;font-weight:700;cursor:pointer">🔄 刷新</button>
+  </div>
+  <div style="padding:10px 16px 0;font-size:11px;color:var(--text3)">市场参考中间价 · 每日更新一次 · <b style="color:var(--yellow)">仅供参考,不是你交易 / 给客户的价</b>,不会写入记账汇率</div>
+  <div id="fx-body" style="padding:14px 16px"></div>
 </div>
 <!-- XLSX -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
@@ -7582,7 +7598,7 @@ function exportPDF(printMode, srcEntries, dateLabel){
   const gRM=srcE.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260910123919 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260910225007 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
@@ -10821,6 +10837,147 @@ function scExportImage(){
     a.href=cv.toDataURL('image/jpeg',0.95);
     a.click();
   }).catch(function(e){ wrap.remove(); alert('导出图片失败：'+e); });
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 外汇行情(2026-09-10 新增)——基于 SGD 的市场参考中间价,来自免密钥公开 API。
+// 严格只读:绝不写入记账用的 rates,断网/API 挂了不影响 app 任何其它功能。
+// 主源 fawazahmed0 currency-api(jsDelivr CDN),两个备源;成功一次就缓存到 localStorage,
+// 之后离线打开也能看上次的数据。
+// ══════════════════════════════════════════════════════════════════════════
+var FX_BASE = 'sgd';
+var FX_SOURCES = [
+  'https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/'+FX_BASE+'.json',
+  'https://latest.currency-api.pages.dev/v1/currencies/'+FX_BASE+'.json',
+  'https://open.er-api.com/v6/latest/SGD'
+];
+var FX_PINNED = ['MYR','THB','IDR','USD','CNY'];   // 置顶常用;前三个还会跟"你今天记的价"对照
+var FX_NAMES = { MYR:'马币', THB:'泰铢', IDR:'印尼盾', USD:'美元', CNY:'人民币', SGD:'新币', HKD:'港币',
+  EUR:'欧元', GBP:'英镑', JPY:'日元', AUD:'澳元', KRW:'韩元', TWD:'新台币', VND:'越南盾', PHP:'菲律宾比索', INR:'印度卢比' };
+// ISO 4217 法定货币码集合。国旗 = 币码前两个字母(几乎所有法币都等于其 ISO 3166 国家码),
+// 不在集合里(加密币/贵金属/…)或多国共用币(X 开头)→ 空旗 🏳️。
+var FX_FIAT_SET = (function(){ var m={}; ('AED AFN ALL AMD ANG AOA ARS AUD AWG AZN BAM BBD BDT BGN BHD BIF BMD BND BOB BRL BSD BTN BWP BYN BZD CAD CDF CHF CLP CNY COP CRC CUP CVE CZK DJF DKK DOP DZD EGP ERN ETB EUR FJD FKP GBP GEL GHS GIP GMD GNF GTQ GYD HKD HNL HRK HTG HUF IDR ILS INR IQD IRR ISK JMD JOD JPY KES KGS KHR KMF KRW KWD KYD KZT LAK LBP LKR LRD LSL LYD MAD MDL MGA MKD MMK MNT MOP MRU MUR MVR MWK MXN MYR MZN NAD NGN NIO NOK NPR NZD OMR PAB PEN PGK PHP PKR PLN PYG QAR RON RSD RUB RWF SAR SBD SCR SDG SEK SGD SHP SLE SLL SOS SRD SSP STN SVC SYP SZL THB TJS TMT TND TOP TRY TTD TWD TZS UAH UGX USD UYU UZS VES VND VUV WST XAF XCD XOF XPF YER ZAR ZMW ZWL').split(' ').forEach(function(c){ m[c]=1; }); return m; })();
+var FX_NOFLAG = { XAF:1, XCD:1, XOF:1, XPF:1, XDR:1, XAU:1, XAG:1, XPT:1, XPD:1, ANG:1 };
+function _currencyFlag(code){
+  code = String(code||'').toUpperCase();
+  if(!FX_FIAT_SET[code] || FX_NOFLAG[code]) return '🏳️';
+  var cc = code.slice(0,2);
+  if(!/^[A-Z]{2}$/.test(cc)) return '🏳️';
+  return String.fromCodePoint(0x1F1E6 + cc.charCodeAt(0)-65) + String.fromCodePoint(0x1F1E6 + cc.charCodeAt(1)-65);
+}
+var _fxLoading = false;
+function _fxCache(v){
+  try{
+    if(v===undefined){ return JSON.parse(localStorage.getItem('mg_fx_cache')||'null'); }
+    localStorage.setItem('mg_fx_cache', JSON.stringify(v));
+  }catch(e){ return null; }
+}
+// 把两种返回格式统一成 { date, rates:{ 大写码: number } }
+function _fxNormalize(url, json){
+  if(!json) return null;
+  if(json.rates && json.base_code){        // open.er-api.com 形态
+    return { date: json.time_last_update_utc || '', rates: json.rates };
+  }
+  var key = Object.keys(json).find(function(k){ return k!=='date' && json[k] && typeof json[k]==='object'; });
+  if(key){                                  // fawazahmed0 形态 { date, sgd:{ myr:.. } }
+    var out={}; Object.keys(json[key]).forEach(function(c){ out[c.toUpperCase()] = json[key][c]; });
+    return { date: json.date || '', rates: out };
+  }
+  return null;
+}
+function _fxFetch(){
+  var tryOne = function(i){
+    if(i>=FX_SOURCES.length) return Promise.reject(new Error('all sources failed'));
+    return fetch(FX_SOURCES[i], {cache:'no-store'})
+      .then(function(r){ if(!r.ok) throw new Error('http '+r.status); return r.json(); })
+      .then(function(j){ var n=_fxNormalize(FX_SOURCES[i], j); if(!n || !n.rates || !n.rates.MYR) throw new Error('bad shape'); return n; })
+      .catch(function(){ return tryOne(i+1); });
+  };
+  return tryOne(0);
+}
+function openFxRates(){
+  document.getElementById('fx-screen').style.display='block';
+  renderFxScreen();          // 先用缓存(如果有)立刻画出来
+  fxRefresh(false);          // 再后台拉一次最新
+}
+function closeFxScreen(){ document.getElementById('fx-screen').style.display='none'; }
+function fxRefresh(manual){
+  if(_fxLoading) return;
+  _fxLoading = true;
+  var up=document.getElementById('fx-updated'); if(up) up.textContent = '　拉取中…';
+  _fxFetch().then(function(n){
+    _fxCache({ ts:Date.now(), date:n.date, rates:n.rates });
+    _fxLoading=false; renderFxScreen();
+  }).catch(function(){
+    _fxLoading=false;
+    var c=_fxCache();
+    var up2=document.getElementById('fx-updated');
+    if(up2) up2.textContent = c ? '　⚠️ 刷新失败,显示的是上次数据' : '';
+    if(manual && !c) alert('拉取失败,请检查网络后再试');
+    renderFxScreen(c ? '刷新失败,以下是上次拉取的数据' : null);
+  });
+}
+function _fxFmtRate(v){
+  var a=Math.abs(v);
+  if(a===0)   return '0';
+  if(a>=100)  return v.toLocaleString(undefined,{maximumFractionDigits:2});
+  if(a>=1)    return v.toFixed(4);
+  return v.toPrecision(4);
+}
+// 对照"你今天记的价"(rates.sgd / rates.sgdThb / rates.sgdIdr)
+function _fxVsMine(code, market){
+  var mine = code==='MYR' ? (rates.sgd||0) : code==='THB' ? (rates.sgdThb||0) : code==='IDR' ? (rates.sgdIdr||0) : 0;
+  if(!mine || !market) return '';
+  var diff = market - mine, pct = mine ? (diff/mine*100) : 0;
+  var arrow = diff>0?'市场高':diff<0?'市场低':'持平';
+  var col = 'var(--text3)';
+  return '<div style="font-size:11px;color:'+col+';margin-top:3px">你今天记的 <b style="font-family:monospace;color:var(--text2)">'+_fxFmtRate(mine)+'</b> · '+arrow+' <b style="font-family:monospace">'+_fxFmtRate(Math.abs(diff))+'</b>（'+(pct>=0?'+':'')+pct.toFixed(2)+'%）</div>';
+}
+function renderFxScreen(note){
+  var body=document.getElementById('fx-body'); if(!body) return;
+  var c=_fxCache();
+  var up=document.getElementById('fx-updated');
+  if(up && c && !_fxLoading && !note) up.textContent = '　上次更新：'+ (c.date ? c.date : new Date(c.ts).toLocaleString('en-MY')) ;
+  if(!c){
+    body.innerHTML = '<div style="text-align:center;color:var(--text3);padding:30px 10px">还没有行情数据。<br>确认联网后点右上角「🔄 刷新」。</div>';
+    return;
+  }
+  var R = c.rates||{};
+  var noteHtml = note ? '<div style="font-size:12px;color:var(--yellow);margin-bottom:10px">⚠️ '+note+'</div>' : '';
+  // 置顶区
+  var pinned = FX_PINNED.filter(function(code){ return R[code]; }).map(function(code){
+    var nm = FX_NAMES[code] ? '（'+FX_NAMES[code]+'）' : '';
+    return '<div style="background:var(--surface);border:1.5px solid var(--border2);border-radius:10px;padding:12px 14px">'+
+      '<div style="font-size:12px;color:var(--text3)"><span style="font-size:15px;margin-right:4px">'+_currencyFlag(code)+'</span>SGD → '+code+nm+'</div>'+
+      '<div style="font-size:22px;font-weight:800;font-family:monospace;margin-top:2px">'+_fxFmtRate(R[code])+'</div>'+
+      _fxVsMine(code, R[code])+
+      '</div>';
+  }).join('');
+  // 全部货币
+  var all = Object.keys(R).filter(function(code){ return code!=='SGD'; }).sort();
+  var rows = all.map(function(code){
+    var nm = FX_NAMES[code] ? ' '+FX_NAMES[code] : '';
+    return '<tr class="fx-row" data-code="'+code+nm.replace(/"/g,'')+'">'+
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--border);white-space:nowrap"><span style="font-size:15px;margin-right:6px">'+_currencyFlag(code)+'</span><span style="font-family:monospace;font-weight:700">'+code+'</span></td>'+
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--border);color:var(--text3);font-size:11px">'+(FX_NAMES[code]||'')+'</td>'+
+      '<td style="padding:6px 8px;border-bottom:1px solid var(--border);text-align:right;font-family:monospace">'+_fxFmtRate(R[code])+'</td></tr>';
+  }).join('');
+  body.innerHTML = noteHtml +
+    '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-bottom:18px">'+pinned+'</div>'+
+    '<div style="font-size:13px;font-weight:800;margin-bottom:8px">全部货币（SGD → 各币）</div>'+
+    '<input id="fx-search" type="text" placeholder="搜货币代码 / 名称，例如 USD 或 美元" oninput="_fxFilter(this.value)" style="width:100%;max-width:320px;background:var(--surface2);border:1.5px solid var(--border2);color:var(--text);padding:7px 10px;border-radius:7px;font-size:13px;margin-bottom:8px">'+
+    '<div style="overflow:auto;border:1.5px solid var(--border2);border-radius:10px"><table style="width:100%;border-collapse:collapse;font-size:13px">'+
+      '<thead><tr><th style="padding:7px 8px;text-align:left;border-bottom:2px solid var(--border2);position:sticky;top:0;background:var(--surface2)">代码</th>'+
+      '<th style="padding:7px 8px;text-align:left;border-bottom:2px solid var(--border2);position:sticky;top:0;background:var(--surface2)">名称</th>'+
+      '<th style="padding:7px 8px;text-align:right;border-bottom:2px solid var(--border2);position:sticky;top:0;background:var(--surface2)">1 SGD =</th></tr></thead>'+
+      '<tbody id="fx-tbody">'+rows+'</tbody></table></div>';
+}
+function _fxFilter(q){
+  q = (q||'').trim().toUpperCase();
+  var tb=document.getElementById('fx-tbody'); if(!tb) return;
+  Array.prototype.forEach.call(tb.querySelectorAll('tr.fx-row'), function(tr){
+    tr.style.display = (!q || (tr.getAttribute('data-code')||'').toUpperCase().indexOf(q)>=0) ? '' : 'none';
+  });
 }
 
 // ═══ L2 行级审计:这一行的完整履历(时间·设备·来源·操作),数据来自意图台账。═══
