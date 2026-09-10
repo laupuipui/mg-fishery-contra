@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- MG Fishery Contra System v20260904165846 -->
+<!-- MG Fishery Contra System v20260910123919 -->
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
@@ -10,7 +10,7 @@
 /* Auto-update: on open, compare this build to the live ver.txt; if newer, reload with a
    cache-busting query (works even when the tablet cached the old HTML). Safe: reloads at most
    once per version per session; offline / dev (DEV) is a no-op. Deploy stamps __APP_VER__+ver.txt. */
-window.__APP_VER__ = '20260904165846';  /*BUILD*/
+window.__APP_VER__ = '20260910123919';  /*BUILD*/
 (function(){
   try{
     var cur = window.__APP_VER__;
@@ -1607,7 +1607,11 @@ function _mergeChartPair(a, b){
   add(primary.entries, true);
   add(secondary.entries, false);
   var mergedEntries = order.map(function(k){ return byKey[k]; });
-  return Object.assign({}, primary, { entries: mergedEntries });
+  // Re-stamp the integrity checksum from the MERGED entries. Without this the merged chart keeps
+  // primary's stale chk (recorded before the union), so _bootIntegrityV1 flags that day as
+  // "possibly corrupt" on every login even though the data is fine — just merged across devices.
+  return Object.assign({}, primary, { entries: mergedEntries,
+    chk: (typeof _chartChk==='function' ? _chartChk(mergedEntries) : primary.chk) });
 }
 
 // Keep the live working set (mg_entries) == the UNION-merged today chart, so a device with a
@@ -1681,14 +1685,33 @@ function _bootIntegrityV1(){
         _persistCurrentChart(); fixed.push('今日表已对齐');
       }
     } catch(e){}
-    // 3) history checksum verification (only where stamped)
+    // 3) history checksum verification (only where stamped).
+    // A mismatch is USUALLY benign: a cross-device sync union-merged that day's chart and left the
+    // pre-merge checksum behind (see _mergeChartPair). If the entries are still a valid, non-empty
+    // array of well-formed rows, treat the stored chk as stale → re-stamp it quietly (breadcrumb in
+    // the op-log) instead of crying wolf every login. Only ALARM when the data itself looks damaged:
+    // entries missing / not an array / all rows gone / malformed rows.
     try {
-      var bad=[];
-      (JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]')||[]).forEach(function(c){
+      var bad=[], healed=[], chartsNow=(JSON.parse(localStorage.getItem(CHARTS_KEY)||'[]')||[]), mutated=false;
+      chartsNow.forEach(function(c){
         if(!c || !c.chk || _chartDay(c)===_dayKey()) return;
-        var k=_chartChk(c.entries);
-        if(k.n!==c.chk.n || k.s!==c.chk.s) bad.push(c.name||_chartDay(c));
+        var arr = c.entries;
+        var damaged = !Array.isArray(arr) ||
+                      (c.chk.n>0 && arr.length===0) ||
+                      !arr.every(function(e){ return e && typeof e==='object' && e._id && isFinite((e.rmAmount!=null?e.rmAmount:e.amount)||0); });
+        if(!damaged){
+          var k=_chartChk(arr);
+          if(k.n!==c.chk.n || k.s!==c.chk.s){ c.chk=k; mutated=true; healed.push(c.name||_chartDay(c)); }
+          return;
+        }
+        var kn = Array.isArray(arr) ? _chartChk(arr).n : 0;
+        bad.push((c.name||_chartDay(c))+'（现有记录 '+kn+' 条 / 校验和记录应有 '+c.chk.n+' 条）');
       });
+      if(mutated){
+        if(typeof safeSetItem==='function') safeSetItem(CHARTS_KEY, JSON.stringify(chartsNow));
+        else localStorage.setItem(CHARTS_KEY, JSON.stringify(chartsNow));
+        if(typeof _logOp==='function') _logOp('system','boot_check·历史表校验和过期，已按现有数据重新盖章：'+healed.join('、'));
+      }
       if(bad.length){
         problems.push('历史表校验和不符: '+bad.join(', '));
         try { alert('⚠️ 数据体检发现历史表可能损坏：\n'+bad.join('\n')+'\n\n请到「历史」核对该日数据（可从备份/Excel恢复）。'); } catch(e){}
@@ -7559,7 +7582,7 @@ function exportPDF(printMode, srcEntries, dateLabel){
   const gRM=srcE.filter(e=>e.group!=='RP').reduce((s,e)=>s+(e.rmAmount||0),0);
   const win=window.open('','_blank');
   win.document.write(`<!DOCTYPE html>
-<!-- MG Fishery Contra System v20260904165846 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
+<!-- MG Fishery Contra System v20260910123919 --><html><head><meta charset="UTF-8"><title>Contra ${ds}</title>
 <style>
 body{font-family:Arial,sans-serif;font-size:9pt;margin:12px;color:#000}
 h3{font-size:12pt;margin-bottom:2px}
